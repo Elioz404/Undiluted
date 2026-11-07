@@ -18,6 +18,7 @@ license = "MIT"
 
 [workspace.dependencies]
 base64 = "0.22"
+bs58 = "0.5"
 borsh = { version = "1", features = ["derive"] }
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
@@ -32,6 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+ureq = { version = "2", features = ["json"] }
 undiluted-client = { path = "crates/client" }
 undiluted-domain = { path = "crates/domain" }
 undiluted-envelope = { path = "crates/envelope" }

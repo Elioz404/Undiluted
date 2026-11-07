@@ -16,7 +16,7 @@ pub struct Client<T> {
     identity: EnclaveIdentity,
     company: CompanyId,
     max_attempts: u32,
-    latest_anchor: Option<AnchorOutput>,
+    pending_anchors: Vec<AnchorOutput>,
 }
 
 impl<T: Transport> Client<T> {
@@ -33,7 +33,7 @@ impl<T: Transport> Client<T> {
             identity,
             company,
             max_attempts,
-            latest_anchor: None,
+            pending_anchors: Vec::new(),
         })
     }
 
@@ -42,10 +42,9 @@ impl<T: Transport> Client<T> {
         &self.identity
     }
 
-    /// The anchor from the most recent commit, ready to publish on chain.
-    #[must_use]
-    pub const fn latest_anchor(&self) -> Option<&AnchorOutput> {
-        self.latest_anchor.as_ref()
+    /// Heads committed since the last call, in order, ready to publish.
+    pub fn take_anchors(&mut self) -> Vec<AnchorOutput> {
+        std::mem::take(&mut self.pending_anchors)
     }
 
     /// Signs a request and sends it, returning the verified response.
@@ -87,8 +86,11 @@ impl<T: Transport> Client<T> {
         if &reply.request != request {
             return Err(ClientError::MismatchedReply);
         }
-        if exchange.anchor.is_some() {
-            self.latest_anchor = exchange.anchor;
+        if let Some(anchor) = exchange.anchor {
+            // A retry can bring back the same stored reply.
+            if !self.pending_anchors.contains(&anchor) {
+                self.pending_anchors.push(anchor);
+            }
         }
         Ok(reply.response)
     }

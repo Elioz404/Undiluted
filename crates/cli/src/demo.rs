@@ -1,11 +1,12 @@
 //! A fictional raise: a founder, two investors and an MFN clause that enforces
 //! itself. Every party signs with its own key and sees only what it may see.
 
-use undiluted_client::{Client, ClientError, Party, Transport};
+use undiluted_client::{AnchorRegistry, Client, ClientError, Party, Transport};
 use undiluted_domain::{
     CompanyId, HolderId, InstrumentId, MfnOffer, Money, Ownership, Ratio, Safe, SafeTerms, Shares,
 };
 use undiluted_ledger::{Event, SettlementReference};
+use undiluted_service::wire::AnchorOutput;
 use undiluted_service::{Actor, Command, Response, Statement};
 
 const MICROS_PER_DOLLAR: u128 = 1_000_000;
@@ -17,6 +18,8 @@ const ANA_INVESTMENT: u128 = 250_000;
 const BEN_INVESTMENT: u128 = 500_000;
 const BEN_POST_MONEY_CAP: u128 = 5_000_000;
 const DEMO_SETTLEMENT: &str = "demo-settlement";
+const FORGED_HEAD: [u8; 32] = [0xab; 32];
+const FORGED_SIGNATURE: [u8; 64] = [0xcd; 64];
 
 /// A holder in the scenario, with the identifier and key they act with.
 struct Member {
@@ -37,41 +40,42 @@ impl Member {
     }
 }
 
-struct Demo<T> {
+struct Demo<T, R> {
     client: Client<T>,
+    anchors: R,
+    company_id: CompanyId,
     company: Party,
     founder: Member,
     ana: Member,
     ben: Member,
 }
 
-pub fn run<T: Transport>(transport: T) -> Result<(), ClientError> {
-    let mut demo = Demo::connect(transport)?;
+pub fn run<T: Transport, R: AnchorRegistry>(transport: T, anchors: R) -> Result<(), ClientError> {
+    let mut demo = Demo::connect(transport, anchors)?;
     demo.incorporate()?;
     demo.raise()?;
     let offer = demo.discover_better_terms()?;
     demo.exercise_mfn(offer)?;
     demo.check_privacy()?;
-    demo.show_commitment();
+    demo.check_history()?;
     println!("\nDone. Every reply was signed by the enclave and checked against its key.");
     Ok(())
 }
 
-impl<T: Transport> Demo<T> {
-    fn connect(transport: T) -> Result<Self, ClientError> {
+impl<T: Transport, R: AnchorRegistry> Demo<T, R> {
+    fn connect(transport: T, anchors: R) -> Result<Self, ClientError> {
         let company = Party::generate()?;
         let suffix = hex::encode(&company.public_key().as_bytes()[..4]);
-        let client = Client::connect(
-            transport,
-            CompanyId::new(format!("demo-{suffix}"))?,
-            MAX_ATTEMPTS,
-        )?;
+        let company_id = CompanyId::new(format!("demo-{suffix}"))?;
+        let client = Client::connect(transport, company_id.clone(), MAX_ATTEMPTS)?;
         println!(
             "Connected to the enclave. Signing key: {}",
             hex::encode(client.identity().signing_key.as_bytes())
         );
         Ok(Self {
             client,
+            anchors,
+            company_id,
             company,
             founder: Member::new("founder")?,
             ana: Member::new("ana")?,
@@ -89,6 +93,8 @@ impl<T: Transport> Demo<T> {
             },
         )?;
         expect(matches!(created, Response::CompanyCreated { .. }), &created)?;
+        let enclave_key = self.client.identity().signing_key;
+        self.anchors.register(&self.company_id, &enclave_key)?;
 
         step("The founder and two investors register, each proving their own key");
         let members = [
@@ -166,6 +172,7 @@ impl<T: Transport> Demo<T> {
             },
         )?;
         expect(matches!(committed, Response::Committed { .. }), &committed)?;
+        self.publish_anchors()?;
         print_statement(
             "Ana",
             &self.client.statement(&self.ana.party, self.ana.actor())?,
@@ -195,13 +202,38 @@ impl<T: Transport> Demo<T> {
         Ok(())
     }
 
-    fn show_commitment(&self) {
-        if let Some(anchor) = self.client.latest_anchor() {
-            step("Anyone may publish this commitment on chain. It reveals nothing about the table");
-            println!("  company  {}", anchor.company);
-            println!("  sequence {}", anchor.sequence);
-            println!("  head     {}", anchor.head);
+    fn check_history(&mut self) -> Result<(), ClientError> {
+        step("Ben checks the head in his statement against the one published on chain");
+        let statement = self.client.statement(&self.ben.party, self.ben.actor())?;
+        let sequence = statement.entries - 1;
+        let shown = hex::encode(statement.head.as_bytes());
+        let published = self.anchors.head_at(&self.company_id, sequence)?;
+        if published.as_deref() != Some(shown.as_str()) {
+            return Err(ClientError::Anchor(format!(
+                "the head at {sequence} does not match: {published:?}"
+            )));
         }
+        println!("  company  {}", self.company_id);
+        println!("  sequence {sequence}");
+        println!("  head     {shown}");
+        println!("  They match, so this is the one history everyone else sees too.");
+
+        step("A forged head for the next entry, not signed by the enclave, is refused");
+        let forged = AnchorOutput {
+            company: self.company_id.to_string(),
+            sequence: statement.entries,
+            head: hex::encode(FORGED_HEAD),
+            signature: hex::encode(FORGED_SIGNATURE),
+        };
+        match self.anchors.publish(&forged) {
+            Err(ClientError::Anchor(_)) => println!("  Refused by the registry."),
+            other => {
+                return Err(ClientError::Protocol(format!(
+                    "the forged head was not refused: {other:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn commit(&mut self, event: Event, holder: &Party, actor: Actor) -> Result<(), ClientError> {
@@ -211,7 +243,35 @@ impl<T: Transport> Demo<T> {
             event,
             &[(&company, Actor::Company), (holder, actor)],
         )?;
-        expect(matches!(response, Response::Committed { .. }), &response)
+        expect(matches!(response, Response::Committed { .. }), &response)?;
+        self.publish_anchors()
+    }
+
+    fn publish_anchors(&mut self) -> Result<(), ClientError> {
+        for anchor in self.client.take_anchors() {
+            self.publish_once(&anchor)?;
+        }
+        Ok(())
+    }
+
+    /// Publishing can report a failure for a call that did land, so a failure
+    /// only counts if the head really is not there afterwards.
+    fn publish_once(&mut self, anchor: &AnchorOutput) -> Result<(), ClientError> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let result = self.anchors.publish(anchor);
+            if result.is_ok() {
+                return result;
+            }
+            let recorded = self.anchors.head_at(&self.company_id, anchor.sequence)?;
+            if recorded.as_deref() == Some(anchor.head.as_str()) {
+                return Ok(());
+            }
+            if attempts >= MAX_ATTEMPTS {
+                return result;
+            }
+        }
     }
 }
 

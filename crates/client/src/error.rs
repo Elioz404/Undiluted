@@ -12,6 +12,8 @@ pub enum ClientError {
     Protocol(String),
     #[error("the enclave reported an error: {0}")]
     Enclave(String),
+    #[error("the anchor registry refused: {0}")]
+    Anchor(String),
     #[error("the reply is not signed by the enclave")]
     UnauthenticReply,
     #[error("the reply answers a different request")]

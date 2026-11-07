@@ -102,7 +102,7 @@ outlayer secrets set --generate PROTECTED_ENCLAVE_KEY:hex32 --project OWNER/PROJ
 Then run the same demo against it, on testnet:
 
 ```bash
-cargo run -p undiluted-cli -- demo outlayer --project OWNER/PROJECT --secrets-account OWNER
+cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-account OWNER --anchor-contract CONTRACT --anchor-signer OWNER
 ```
 
 ## Rules and their limits
