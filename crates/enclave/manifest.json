@@ -1,0 +1,10 @@
+{
+  "display": { "name": "Undiluted" },
+  "capabilities": { "network": [] },
+  "signing_keys": [
+    { "path": "enclave", "type": "ed25519", "caller": "none" }
+  ],
+  "encryption_keys": [
+    { "path": "ledger" }
+  ]
+}
