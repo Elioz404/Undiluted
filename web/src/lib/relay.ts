@@ -11,8 +11,15 @@ export class RelayError extends Error {
   }
 }
 
+/** Where the relay is. Empty means the same origin as the page. */
+let base = "";
+
+export function useRelayAt(url: string): void {
+  base = url.replace(/\/$/, "");
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${base}/api${path}`, {
     ...init,
     headers: { "content-type": "application/json", ...init?.headers },
   });
