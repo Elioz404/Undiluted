@@ -18,6 +18,8 @@ pub enum ServiceError {
     CompanyExists,
     #[error("this company does not exist")]
     UnknownCompany,
+    #[error("you can only review and sign your invitation until it is recorded")]
+    NotYetRegistered,
     #[error("this actor may not do that")]
     Forbidden,
     #[error("only a holder can request a statement")]

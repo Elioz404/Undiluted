@@ -155,25 +155,43 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         ledger: &Ledger,
         proposal: Option<&Proposal>,
     ) -> Result<(), ServiceError> {
-        let key = match &request.actor {
+        let registered = match &request.actor {
             Actor::Company => Some(ledger.config().company_key),
-            Actor::Holder(holder) => ledger.holder_key(holder).or_else(|| {
-                // Someone being invited has a key in the open proposal but is
-                // not registered until that proposal commits.
-                proposal.and_then(|open| match &open.event {
-                    Event::HolderRegistered {
-                        holder: invited,
-                        key,
-                    } if invited == holder => Some(*key),
-                    _ => None,
-                })
-            }),
+            Actor::Holder(holder) => ledger.holder_key(holder),
         };
-        let digest = request.digest()?;
-        if key.is_some_and(|key| key.verifies(&digest, &request.signature)) {
+        let key = match registered {
+            Some(key) => key,
+            None => Self::invited_key(request, proposal)?,
+        };
+        if key.verifies(&request.digest()?, &request.signature) {
             Ok(())
         } else {
             Err(ServiceError::InvalidSignature)
+        }
+    }
+
+    /// Someone being invited has a key in the open proposal but is not a holder
+    /// until it commits. Until then they may only read and sign that invitation.
+    fn invited_key(
+        request: &SignedRequest,
+        proposal: Option<&Proposal>,
+    ) -> Result<PublicKey, ServiceError> {
+        let Actor::Holder(holder) = &request.actor else {
+            return Err(ServiceError::InvalidSignature);
+        };
+        let Some(Event::HolderRegistered {
+            holder: invited,
+            key,
+        }) = proposal.map(|open| &open.event)
+        else {
+            return Err(ServiceError::InvalidSignature);
+        };
+        if invited != holder {
+            return Err(ServiceError::InvalidSignature);
+        }
+        match request.command {
+            Command::GetProposal | Command::Sign { .. } => Ok(*key),
+            _ => Err(ServiceError::NotYetRegistered),
         }
     }
 

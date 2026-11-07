@@ -331,6 +331,27 @@ fn nobody_can_act_as_someone_else() {
 }
 
 #[test]
+fn an_invited_holder_sees_nothing_else_until_registered() {
+    let mut harness = seeded();
+    harness.propose(Event::HolderRegistered {
+        holder: holder("eve"),
+        key: public(MALLORY_SEED),
+    });
+
+    for command in [
+        Command::GetStatement,
+        Command::GetCapTable,
+        Command::GetPayoutPlan,
+    ] {
+        let reply = harness.send(MALLORY_SEED, Actor::Holder(holder("eve")), command);
+        assert_eq!(
+            rejected(&reply),
+            "you can only review and sign your invitation until it is recorded"
+        );
+    }
+}
+
+#[test]
 fn an_invited_holder_can_read_the_proposal_before_registering() {
     let mut harness = seeded();
     harness.propose(Event::HolderRegistered {
