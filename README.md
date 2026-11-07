@@ -1,111 +1,206 @@
 # Undiluted
 
-A confidential cap table for companies that raise in crypto. Each investor sees
-only their own position, yet can verify that the total adds up and that nobody
-was diluted in secret.
+[![CI](https://github.com/Elioz404/Undiluted/actions/workflows/ci.yml/badge.svg)](https://github.com/Elioz404/Undiluted/actions/workflows/ci.yml)
 
-A cap table today is either a private spreadsheet you have to trust or a vendor
-database you have to trust. Putting it on a public chain would expose every
-investor and every term. Undiluted keeps the table private and publishes only a
-commitment to its history.
+A confidential cap table that runs itself. Each investor sees only their own
+stake, yet can prove the total adds up and that nothing changed behind their
+back. Rounds take money and issue SAFEs without the founder in the loop, rights
+like MFN exercise themselves, and an exit pays everyone out with one approval.
 
-## How it works
+Built for NEAR HACKATHON (November 2026). Runs on NEAR testnet.
 
-- **Every change is a signed event.** The current table is never stored on its
-  own; it is the result of replaying the events.
-- **Holders co-sign what affects them.** An instrument cannot be issued or changed
-  without the signature of the holder and the company. An MFN election needs only
-  the holder: the right was granted when the SAFE was issued.
-- **History is chained.** Each entry commits to the previous one, so one digest,
-  the head, commits to everything before it without revealing any of it.
-- **The table lives in a TEE.** The service runs in an Intel TDX enclave on
-  [OutLayer](https://outlayer.ai), with storage only that code can decrypt.
-- **Messages are encrypted end to end.** Inputs and outputs of on-chain runs are
-  public, so each request and reply is encrypted between the client and the
-  enclave, and padded so its size says nothing about what it carries.
-- **Heads are anchored on NEAR.** The anchor contract accepts a head only with the
-  enclave's signature, only in order, and never replaces one. Anyone can relay it,
-  but nobody can forge it, and investors can compare the head in their statement
-  with the published one.
-- **Exits pay out on their own.** The board approves a sale once. The enclave works
-  out each payout and signs it; a contract holds the funds and pays only what is
-  signed, each payment once, never more than was deposited. Anyone can relay a
-  payment, and nobody can change its recipient or amount.
-- **Investments are checked on chain.** An investor pays through the 1Click API. A
-  SAFE is only accepted if the token's own contract recorded that exact amount
-  arriving at the company's treasury, in a final transaction, and no other instrument
-  already relies on that payment.
+## The problem
 
-The rules use integer arithmetic only: replaying the same events gives the same
-result on any machine.
+A startup's cap table is a private spreadsheet or a vendor database. Investors
+have to trust whoever keeps it: nobody can check that a later SAFE got better
+terms in secret, that a payment really arrived, or that the table they were shown
+is the one everyone else sees. Putting it on a public chain fixes the trust and
+breaks the privacy: every investor, amount and term would be public.
 
-## Project layout
+Undiluted keeps the table inside a TEE, publishes only a commitment to its
+history on NEAR, and lets the rules act on their own:
 
-| Path | Responsibility | Depends on |
+| Who | Can do | Cannot do |
 | --- | --- | --- |
-| `crates/domain` | Instruments, SAFE conversion, MFN, exit distribution | nothing that does I/O |
-| `crates/ledger` | Signed hash-chained events that rebuild a cap table | `domain` |
-| `crates/envelope` | End-to-end encryption between client and enclave | nothing that does I/O |
-| `crates/service` | Authorization, proposals, statements; storage and signing are ports | `ledger`, `envelope` |
-| `crates/client` | Signs, encrypts and sends requests, verifies replies | `service` |
-| `crates/cli` | The runnable demo | `client` |
-| `crates/enclave` | Connects OutLayer's sealed storage and TEE keys to the service | `service` |
-| `contracts/anchor` | Append-only registry of heads on NEAR | `near-sdk` |
-| `contracts/distribution` | Holds exit proceeds and pays what the enclave signed | `near-sdk` |
+| Company | Read the full table, open a round, issue SAFEs against real payments, approve an exit | Issue a SAFE for a payment that never happened, reuse a payment, change history, block an MFN election, redirect a payout |
+| Investor | See their own lines, verify the total and the history against NEAR, subscribe to an open round alone, adopt better terms through MFN, choose where to be paid | See any other investor, their amounts or their terms |
+| Anyone | Read an open round's terms, relay transactions | Forge a head, claim someone else's payment, alter or repeat a payout |
 
-`crates/enclave` targets `wasm32-wasip2` only, so it is outside the Cargo workspace.
+## Money with a mind of its own
 
-## Try it
+Three things happen without anyone approving them each time:
 
-Requires [Rust](https://rustup.rs). The toolchain is pinned in
-`rust-toolchain.toml` and installs itself. Windows users without the MSVC build
-tools can use the Docker form instead.
+- **The round runs itself.** The founder signs a round's limits once: SAFE terms,
+  smallest check, round size. From then on an investor pays, signs, and the
+  enclave records their SAFE if the payment is real and the round has room. The
+  payment's memo names the investor's key, so nobody watching the treasury can
+  claim it.
+- **Rights enforce themselves.** When a later SAFE gets better terms, an MFN
+  holder sees an offer in their statement, without learning who got those terms
+  or for how much, and adopts them alone. The company cannot block it.
+- **Exits pay out on their own.** The board approves a sale once. The enclave
+  works out the waterfall and signs each payout; a contract holds the proceeds
+  and pays only what is signed, each payment once, never more than was deposited.
 
-Run a fictional raise, with no account, key or network. This runs the real enclave
-code in-process, so it shows the rules, not the confidentiality:
+## Try it in two minutes
+
+Needs [Rust](https://rustup.rs). The toolchain is pinned in `rust-toolchain.toml`
+and installs itself. On Windows without the MSVC build tools, prefix the commands
+with `docker run --rm -v "$PWD:/work" -w /work rust:1.99`.
 
 ```bash
 cargo run -p undiluted-cli -- demo local
 ```
 
-You will see an MFN holder get offered better terms without learning who received
-them, exercise the clause alone, another investor be refused the full table, and an
-impostor be refused. Then the company is sold: the board
-signs once, the payouts go out, and each investor sees only their own.
+This runs the real enclave code in-process, with no account, key or network. It
+proves the rules; the testnet deployment below adds the confidentiality. You
+will see, in order:
 
-Run the tests:
+1. The company and three holders register, each proving their own key.
+2. Ana pays and gets an uncapped MFN SAFE. Ben pays and gets a capped SAFE.
+3. Three forged SAFEs are refused: an invented payment, a reused one and an
+   inflated one.
+4. Ana's statement offers her Ben's better terms without naming Ben, and she
+   adopts them alone.
+5. The founder opens a round. Someone tries to claim Ben's payment and is refused
+   because the memo names Ben's key. Ben subscribes and the enclave records it
+   with no founder signature.
+6. Ben is refused the full table, an impostor is refused Ben's statement, and
+   Ben's head matches the published one. A forged head is refused.
+7. The company is sold for $10. Each payout follows the waterfall, adds up to
+   the exact proceeds, and a stolen or inflated payout is refused.
+
+Run every test:
 
 ```bash
 cargo test --workspace
 ```
 
-```bash
-docker run --rm -v "$PWD:/work" -w /work rust:1.99 cargo test --workspace
-```
-
-Do this, and see this:
+## Check each claim
 
 | Run | What it shows |
 | --- | --- |
 | `cargo test -p undiluted-domain conversion` | SAFEs convert to the share counts worked out by hand in each test comment |
 | `cargo test -p undiluted-domain waterfall` | Who takes their money back and who converts at small, medium and large exits, always adding up to the exact proceeds |
 | `cargo test -p undiluted-domain mfn` | A later SAFE with better terms lets an earlier MFN holder adopt them |
-| `cargo test -p undiluted-ledger` | Altered, removed or forged entries are rejected, and a rewritten history no longer matches the head a holder kept |
+| `cargo test -p undiluted-ledger` | Altered, removed or forged entries are rejected; a round enforces its terms, smallest check and size; a rewritten history no longer matches the head a holder kept |
 | `cargo test -p undiluted-envelope` | Only the enclave opens a request, only the sender opens the reply, and tampering is detected |
-| `cargo test -p undiluted-service` | Who may do what, that a retried request does not act twice, and that a SAFE cannot rest on an invented, reused, redirected or inflated payment |
+| `cargo test -p undiluted-service` | Who may do what; a retried request does not act twice; a SAFE cannot rest on an invented, reused, redirected or inflated payment; a subscription needs a payment whose memo names its key |
 | `cargo test -p undiluted-client` | Answers lost on the way back do not apply anything twice |
 | `cargo test -p undiluted-anchor` | A head needs the enclave's signature and cannot be overwritten or skipped |
 | `cargo test -p undiluted-distribution` | A relay cannot change a payout, repeat one, or pay more than was deposited |
 
-## Deploying the enclave
+## The web app
+
+A company console and an investor view in the browser. Keys are made and kept in
+the browser; requests are signed and encrypted there by the same Rust code,
+compiled to WebAssembly. A small relay forwards ciphertext to the enclave and
+pays for transactions; it never sees a key or a position.
+
+To run it locally you need Node 24, `wasm-bindgen-cli` 0.2.130 and a funded
+testnet account for the relay:
+
+```bash
+cargo install wasm-bindgen-cli --version 0.2.130 --locked
+cd web && npm ci && sh scripts/build-wasm.sh
+cp .env.example .env.local   # then set RELAY_ACCOUNT and RELAY_PRIVATE_KEY
+npm run dev
+```
+
+Open http://localhost:5173 and:
+
+1. Press **Start a demo company**. The company console opens with the founder's
+   stock already recorded on chain.
+2. Press **Check against NEAR** under the table. The head shown matches the one
+   the anchor contract holds.
+3. In **Next steps**, open the **Round** tab and open a round.
+4. From **Investors**, open Ben's view in a new tab. Ben is not on the cap table.
+   In the **Round** tab, press **Pay and subscribe**: Ben pays test USDC with a
+   memo naming his key, signs, and his SAFE appears. Back in the console, press
+   **Refresh**: Ben is on the table, and nobody approved it.
+
+Each step is a real enclave run on testnet, so it takes several seconds. The
+whole flow also runs headless against a relay:
+
+```bash
+cd web && RELAY_URL=http://localhost:8080 npx tsx scripts/e2e.ts
+```
+
+## Deployed on NEAR testnet
+
+| What | Where |
+| --- | --- |
+| Enclave (OutLayer project, Intel TDX) | `undiluted-dev.testnet/undiluted`, wasm sha256 `2da08346d01a5765beb364ecadc6df667bbe91fe4832b03a5d83b9e98bd961b1` |
+| Anchor contract | [`anchor.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/anchor.undiluted-dev.testnet) |
+| Distribution contract | [`distribution.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/distribution.undiluted-dev.testnet) |
+| Treasury | [`treasury.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/treasury.undiluted-dev.testnet) |
+| Test stablecoins | `usdc.tidepool-sandbox.testnet`, `usdt.tidepool-sandbox.testnet` |
+
+## How it works
+
+```mermaid
+flowchart LR
+  B[Browser or CLI<br/>keys, signing, encryption] -- ciphertext --> R[Relay]
+  R -- request_execution --> E[Enclave on OutLayer<br/>Intel TDX, sealed storage]
+  E -- reads payments --> N[(NEAR RPC)]
+  R -- signed head --> A[Anchor contract]
+  R -- signed payout --> D[Distribution contract]
+  B -- compares heads --> A
+```
+
+- **Every change is a signed event.** The current table is never stored on its
+  own; it is the result of replaying the events. Replaying the same events gives
+  the same result on any machine, because the rules use integer arithmetic only.
+- **Holders co-sign what affects them.** An instrument cannot be issued or changed
+  without the holder's signature. The company signs too, except where it granted
+  the right in advance: an MFN election, a payout account, a subscription to the
+  round it opened.
+- **History is chained.** Each entry commits to the previous one, so one digest,
+  the head, commits to everything before it without revealing any of it.
+- **The table lives in a TEE.** The service runs in an Intel TDX enclave on
+  [OutLayer](https://outlayer.ai), with storage only that code can decrypt. Its
+  signing key is generated inside the TEE and never leaves it.
+- **Messages are encrypted end to end.** Inputs and outputs of on-chain runs are
+  public, so each request and reply is encrypted between the client and the
+  enclave (X25519, HKDF, ChaCha20-Poly1305) and padded so its size says nothing.
+- **Heads are anchored on NEAR.** The anchor contract accepts a head only with
+  the enclave's signature, only in order, and never replaces one. An investor
+  compares the head in their statement with the published one.
+- **Payments are checked on chain.** A SAFE is accepted only if the token's own
+  contract logged that exact amount arriving at the treasury, in a final
+  transaction, and no other instrument relies on that payment. The company's own
+  SAFEs can be paid through the 1Click API from another token; a self-serve
+  subscription is paid in the treasury's token on NEAR, because only a direct
+  transfer can carry the memo that ties it to the investor.
+
+## Project layout
+
+| Path | Responsibility | Depends on |
+| --- | --- | --- |
+| `crates/domain` | Instruments, SAFE conversion, MFN, exit distribution | nothing that does I/O |
+| `crates/ledger` | Signed hash-chained events that rebuild a cap table, rounds included | `domain` |
+| `crates/envelope` | End-to-end encryption between client and enclave | nothing that does I/O |
+| `crates/service` | Authorization, proposals, statements, payment checks; storage, signing and the chain are ports | `ledger`, `envelope` |
+| `crates/client` | Signs, encrypts and sends requests, verifies replies | `service` |
+| `crates/cli` | The runnable demo | `client` |
+| `crates/web` | The client protocol for browsers, as WebAssembly | `service` |
+| `crates/enclave` | Connects OutLayer's sealed storage, TEE keys and RPC to the service | `service` |
+| `contracts/anchor` | Append-only registry of heads on NEAR | `near-sdk` |
+| `contracts/distribution` | Holds exit proceeds and pays what the enclave signed | `near-sdk` |
+| `web/src` | Company console and investor view (React) | `crates/web` |
+| `web/server` | Relay: forwards ciphertext, publishes heads, pays from test funds | `near-api-js` |
+
+`crates/enclave` targets `wasm32-wasip2` only, so it is outside the Cargo workspace.
+
+## Deploying your own
 
 ```bash
 cd crates/enclave && cargo build --target wasm32-wasip2 --release
 ```
 
 Upload the wasm with the [OutLayer CLI](https://github.com/out-layer/outlayer-cli),
-deploy it as a project, and generate the enclave key inside the TEE so nobody ever
-sees it:
+deploy it as a project, and generate the enclave key inside the TEE so nobody
+ever sees it:
 
 ```bash
 outlayer secrets set --generate PROTECTED_ENCLAVE_KEY:hex32 --project OWNER/PROJECT
@@ -118,59 +213,86 @@ Build the contracts and deploy them, for example to `anchor.OWNER` and
 RUSTFLAGS='-C target-cpu=mvp -C link-arg=-s' cargo build -p undiluted-anchor -p undiluted-distribution --target wasm32-unknown-unknown --release
 ```
 
-Then run the same demo against both, with test payments through
-[Tidepool](https://www.usetidepool.tech), a community-run 1Click sandbox on testnet.
-Get free test tokens from its faucet first:
+Test payments use [Tidepool](https://www.usetidepool.tech), a community-run
+1Click sandbox on testnet. Get free test tokens from its faucet first:
 
 ```bash
 curl -X POST https://www.usetidepool.tech/v0/faucet -H 'content-type: application/json' -d '{"accountId":"OWNER","mode":"wallet"}'
 ```
 
+Then run the demo against the deployment:
+
 ```bash
 cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-account OWNER --anchor-contract anchor.OWNER --signer OWNER --treasury TREASURY --payment-api https://www.usetidepool.tech --origin-asset nep141:usdt.tidepool-sandbox.testnet --destination-asset nep141:usdc.tidepool-sandbox.testnet --distribution-contract distribution.OWNER --founder-account FOUNDER --ana-account ANA --ben-account BEN
 ```
 
+The deployed CLI demo pays through 1Click, which cannot attach a memo, so it
+skips the self-serve round; the web app runs that step on testnet. The web app
+and its relay also ship as one container image: `docker build -t undiluted .`
+
 ## Rules and their limits
 
-- SAFEs follow post-money mechanics. A round issues whichever of round price, cap
-  or discount gives the holder the most shares.
-- Round conversion does not model an option pool increase in the round itself.
-- Exits are non-participating and pari passu between preferred stock and SAFEs. A
-  SAFE with no valuation cap can only take its money back. Unissued options and
+- SAFEs follow post-money mechanics. A priced round issues whichever of round
+  price, cap or discount gives the holder the most shares. Round conversion does
+  not model an option pool increase in the round itself.
+- Exits are non-participating and pari passu between preferred stock and SAFEs.
+  A SAFE with no valuation cap can only take its money back. Unissued options and
   token warrants receive nothing.
-- One deployment serves its calls through one relay account, because the enclave's
-  storage is bound to the account that signs the call.
+- One proposal is open per company at a time, so two investors subscribing at the
+  same moment take turns.
+- Anyone can read an open round's terms and size. What was raised stays private;
+  a subscription that would overflow the round is refused.
+- One deployment serves its calls through one relay account, because the
+  enclave's storage is bound to the account that signs the call.
 - Anchors reveal a company identifier and how many events it has recorded.
-- Test payments run on Tidepool, a third-party sandbox that is not affiliated with
-  NEAR and whose test tokens have no value. NEAR Intents has no official testnet.
-- Exit payouts go directly to NEAR accounts, so their recipients and amounts are
-  public on chain. Each investor's view in the product stays private; the chain does
-  not hide the final transfers.
-- Payments in the demo start from a NEAR account. The enclave trusts the RPC proxy
-  of the worker it runs on to report transactions honestly.
-- A settlement does not hide amounts: deposits on the paying chain stay visible. What
-  stays private is the cap table.
-- Confidentiality depends on the TEE and on OutLayer's platform; see
-  [what its operator can and cannot do](https://github.com/out-layer/outlayer/blob/main/docs/NON_CUSTODIAL.md).
-- The ledger protects what is recorded in it. It cannot stop a founder from signing
-  something outside of it.
-- Instruments are recorded, not offered. This is not legal advice, and a real raise
-  needs legal counsel.
+- Payments and exit payouts move on chain, so their amounts are public there. What
+  stays private is the cap table: who holds what, on which terms.
+- The enclave trusts the RPC proxy of the worker it runs on to report
+  transactions honestly. Confidentiality depends on the TEE and on OutLayer's
+  platform; see [what its operator can and cannot do](https://github.com/out-layer/outlayer/blob/main/docs/NON_CUSTODIAL.md).
+  The Intel attestation chain is published by OutLayer per run and is not yet
+  verified by the client.
+- Test payments run on Tidepool, a third-party sandbox not affiliated with NEAR,
+  whose tokens have no value. NEAR Intents has no official testnet.
+- The ledger protects what is recorded in it. It cannot stop a founder from
+  signing something outside of it.
+- Instruments are recorded, not offered. This is not legal advice, and a real
+  raise needs legal counsel.
+
+## NEAR HACKATHON
+
+- **Tracks:** Privacy & Private AI, Real-World Money, Autonomous Business, Open
+  Innovation.
+- **Built in the window:** the repository started on 6 November 2026; all code
+  was written during the hackathon.
+- **NEAR in it:** an OutLayer TEE runs the service; NEAR contracts anchor every
+  head and pay exits only on the enclave's signature; NEP-141 stablecoin transfers,
+  read from the token's own logs, back every SAFE; the 1Click API routes
+  cross-token payments.
 
 ## Third-party code
 
 Built on [near-sdk](https://github.com/near/near-sdk-rs),
 [borsh](https://github.com/near/borsh-rs),
-[ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek),
+[ed25519-dalek and x25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek),
 [sha2](https://github.com/RustCrypto/hashes),
-[primitive-types](https://github.com/paritytech/parity-common),
-[thiserror](https://github.com/dtolnay/thiserror),
-[x25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek),
 [chacha20poly1305](https://github.com/RustCrypto/AEADs),
 [hkdf](https://github.com/RustCrypto/KDFs),
+[primitive-types](https://github.com/paritytech/parity-common),
+[thiserror](https://github.com/dtolnay/thiserror),
+[serde](https://github.com/serde-rs/serde),
+[wasm-bindgen](https://github.com/rustwasm/wasm-bindgen),
 [outlayer](https://github.com/out-layer/outlayer),
 [clap](https://github.com/clap-rs/clap) and, for tests,
-[proptest](https://github.com/proptest-rs/proptest).
+[proptest](https://github.com/proptest-rs/proptest). The web app uses
+[React](https://react.dev), [Vite](https://vite.dev),
+[Express](https://expressjs.com) and
+[near-api-js](https://github.com/near/near-api-js), with the
+[General Sans](https://www.fontshare.com/fonts/general-sans) and
+[Geist Mono](https://vercel.com/font) typefaces.
+
+AI coding assistants were used during development. Every change was reviewed,
+tested and committed by the team.
 
 ## License
 
