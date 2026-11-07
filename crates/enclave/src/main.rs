@@ -8,7 +8,7 @@ use undiluted_envelope::EnclaveSecret;
 use undiluted_service::wire::{self, Input, Output};
 use undiluted_service::{Gateway, Service};
 
-use platform::{SealedStore, TeeSigner};
+use platform::{NearChain, SealedStore, TeeSigner};
 
 /// Embedded in a custom section, so the wasm hash also covers these keys.
 #[used]
@@ -23,7 +23,7 @@ fn execute() -> Result<Output, String> {
         .map_err(|error| format!("invalid input: {error}"))?
         .ok_or("missing input")?;
     let secret = load_secret()?;
-    let service = Service::new(SealedStore, TeeSigner);
+    let service = Service::new(SealedStore, TeeSigner, NearChain);
     Ok(wire::run(&mut Gateway::new(secret, service), &input))
 }
 

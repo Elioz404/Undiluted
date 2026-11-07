@@ -16,7 +16,7 @@ mod wire_codec;
 pub use anchors::{AnchorRegistry, LocalAnchors, NearAnchors, NearAnchorsConfig};
 pub use client::Client;
 pub use error::ClientError;
-pub use local::LocalTransport;
+pub use local::{LOCAL_TOKEN, LOCAL_TREASURY, LocalTransport};
 pub use near_cli::NearCli;
 pub use outlayer::{OutLayerConfig, OutLayerTransport};
 pub use party::Party;

@@ -1,0 +1,12 @@
+package near:rpc@0.1.0;
+
+// The part of OutLayer's NEAR RPC host interface this enclave uses. It only ever
+// reads the chain; it holds no key that could send a transaction.
+interface api {
+    /// Returns the transaction as JSON, or an error message as the second value.
+    tx-status: func(tx-hash: string, sender-account-id: string, wait-until: string) -> tuple<string, string>;
+}
+
+world undiluted-enclave {
+    import api;
+}
