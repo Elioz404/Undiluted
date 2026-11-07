@@ -1081,8 +1081,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if 1.0.5",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3150,6 +3152,25 @@ dependencies = [
  "undiluted-domain",
  "undiluted-envelope",
  "undiluted-ledger",
+]
+
+[[package]]
+name = "undiluted-web"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "borsh",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "undiluted-domain",
+ "undiluted-envelope",
+ "undiluted-ledger",
+ "undiluted-service",
+ "wasm-bindgen",
 ]
 
 [[package]]

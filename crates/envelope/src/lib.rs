@@ -68,6 +68,17 @@ impl core::fmt::Debug for ReplyKey {
 }
 
 impl ReplyKey {
+    /// Restores a key kept between sending a request and reading its reply.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; KEY_LENGTH]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn to_bytes(&self) -> [u8; KEY_LENGTH] {
+        self.0
+    }
+
     pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
         encrypt(&self.0, plaintext)
     }
