@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  check:
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,7 +14,29 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - run: cargo check -p undiluted-anchor --target wasm32-unknown-unknown
+      - run: cargo check -p undiluted-anchor -p undiluted-distribution --target wasm32-unknown-unknown
       - run: cargo run -p undiluted-cli -- demo local
       - run: cargo build --target wasm32-wasip2 --release
         working-directory: crates/enclave
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.130
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: sh scripts/build-wasm.sh
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build
