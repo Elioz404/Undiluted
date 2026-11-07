@@ -5,11 +5,11 @@ use undiluted_domain::{
     CompanyId, HolderId, InstrumentId, Money, Ownership, Ratio, Safe, SafeTerms, Shares,
 };
 use undiluted_ledger::{
-    Digest, Event, PayoutDestination, PublicKey, SettlementReference, SignatureBytes,
+    Digest, Event, PayoutDestination, PublicKey, SettlementReference, SignatureBytes, Treasury,
 };
 use undiluted_service::{
-    Actor, Command, EnclaveSigner, MemoryStore, PayoutInstruction, Reply, Response, Service,
-    SignedRequest, StoreError,
+    Actor, ChainError, ChainReader, Command, EnclaveSigner, MemoryStore, PayoutInstruction, Reply,
+    Response, Service, SignedRequest, StoreError, TokenTransfer,
 };
 
 const COMPANY_SEED: u8 = 1;
@@ -27,6 +27,27 @@ impl EnclaveSigner for TestSigner {
 
     fn sign(&self, message: &[u8]) -> Result<SignatureBytes, StoreError> {
         Ok(SignatureBytes::from_bytes(self.0.sign(message).to_bytes()))
+    }
+}
+
+const TREASURY: &str = "treasury.near";
+const TOKEN: &str = "usdc.near";
+
+/// A chain where a reference spells out what it paid: `<token>:<to>:<amount>:<id>`.
+#[derive(Debug)]
+struct TestChain;
+
+impl ChainReader for TestChain {
+    fn token_transfers(&self, reference: &str) -> Result<Vec<TokenTransfer>, ChainError> {
+        let parts: Vec<&str> = reference.split(':').collect();
+        let [token, to, amount, _] = parts[..] else {
+            return Err(ChainError("no such transaction".to_owned()));
+        };
+        Ok(vec![TokenTransfer {
+            token: token.to_owned(),
+            to: to.to_owned(),
+            amount: Money::new(amount.parse().unwrap()),
+        }])
     }
 }
 
@@ -55,7 +76,7 @@ fn usd(dollars: u128) -> Money {
 }
 
 struct Harness {
-    service: Service<MemoryStore, TestSigner>,
+    service: Service<MemoryStore, TestSigner, TestChain>,
     company: CompanyId,
     next_id: u8,
 }
@@ -63,7 +84,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let mut harness = Self {
-            service: Service::new(MemoryStore::default(), TestSigner(key(42))),
+            service: Service::new(MemoryStore::default(), TestSigner(key(42)), TestChain),
             company: CompanyId::new("acme").unwrap(),
             next_id: 0,
         };
@@ -155,6 +176,10 @@ impl Harness {
     }
 }
 
+fn paid_reference(id: &str, purchase: u128) -> String {
+    format!("{TOKEN}:{TREASURY}:{}:{id}", usd(purchase).value())
+}
+
 fn safe(id: &str, owner: &str, purchase: u128, cap: Option<u128>, mfn: bool) -> Event {
     Event::SafeIssued {
         instrument: instrument(id),
@@ -164,7 +189,7 @@ fn safe(id: &str, owner: &str, purchase: u128, cap: Option<u128>, mfn: bool) -> 
             SafeTerms::new(cap.map(usd), None, mfn).unwrap(),
         )
         .unwrap(),
-        settlement: SettlementReference::new("tx").unwrap(),
+        settlement: SettlementReference::new(paid_reference(id, purchase)).unwrap(),
     }
 }
 
@@ -178,6 +203,17 @@ fn rejected(reply: &Reply) -> &str {
 /// Ana holds the founders' shares and an MFN SAFE, Ben a capped SAFE.
 fn seeded() -> Harness {
     let mut harness = Harness::new();
+    let digest = harness.propose(Event::TreasuryDesignated {
+        treasury: Treasury::new(TREASURY, TOKEN).unwrap(),
+    });
+    harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::Sign {
+            digest,
+            signature: sign_digest(COMPANY_SEED, &digest),
+        },
+    );
     harness.register("ana", ANA_SEED);
     harness.register("ben", BEN_SEED);
     harness.commit(
@@ -403,7 +439,7 @@ fn retrying_a_request_returns_the_first_answer_without_acting_twice() {
 
     assert!(matches!(first.response, Response::Committed { .. }));
     assert_eq!(first, retry);
-    assert_eq!(harness.statement("ben", BEN_SEED).entries, 6);
+    assert_eq!(harness.statement("ben", BEN_SEED).entries, 7);
 }
 
 #[test]
@@ -602,5 +638,109 @@ fn nothing_can_be_issued_after_an_exit() {
     assert_eq!(
         rejected(&reply),
         "this company has already approved an exit"
+    );
+}
+
+fn safe_paid_with(id: &str, purchase: u128, reference: &str) -> Event {
+    Event::SafeIssued {
+        instrument: instrument(id),
+        holder: holder("ben"),
+        safe: Safe::new(
+            usd(purchase),
+            SafeTerms::new(Some(usd(purchase * 10)), None, false).unwrap(),
+        )
+        .unwrap(),
+        settlement: SettlementReference::new(reference).unwrap(),
+    }
+}
+
+fn proposal_rejection(harness: &mut Harness, event: Event) -> String {
+    let reply = harness.send(COMPANY_SEED, Actor::Company, Command::Propose { event });
+    rejected(&reply).to_owned()
+}
+
+#[test]
+fn a_payment_that_does_not_exist_is_refused() {
+    let mut harness = seeded();
+    let reason = proposal_rejection(&mut harness, safe_paid_with("fake", 5, "invented"));
+    assert_eq!(
+        reason,
+        "the payment could not be confirmed on chain: no such transaction"
+    );
+}
+
+#[test]
+fn a_payment_to_someone_else_is_refused() {
+    let mut harness = seeded();
+    let elsewhere = format!("{TOKEN}:other.near:{}:x", usd(5).value());
+    let reason = proposal_rejection(&mut harness, safe_paid_with("elsewhere", 5, &elsewhere));
+    assert!(reason.starts_with("the payment does not match"), "{reason}");
+}
+
+#[test]
+fn a_payment_in_another_token_is_refused() {
+    let mut harness = seeded();
+    let other_token = format!("fake.near:{TREASURY}:{}:x", usd(5).value());
+    let reason = proposal_rejection(&mut harness, safe_paid_with("token", 5, &other_token));
+    assert!(reason.starts_with("the payment does not match"), "{reason}");
+}
+
+#[test]
+fn a_smaller_payment_cannot_back_a_larger_safe() {
+    let mut harness = seeded();
+    let small = format!("{TOKEN}:{TREASURY}:{}:x", usd(1).value());
+    let reason = proposal_rejection(&mut harness, safe_paid_with("large", 500, &small));
+    assert!(reason.starts_with("the payment does not match"), "{reason}");
+}
+
+#[test]
+fn one_payment_cannot_back_two_safes() {
+    let mut harness = seeded();
+    let reused = paid_reference("ben-safe", 500_000);
+    let reason = proposal_rejection(&mut harness, safe_paid_with("again", 500_000, &reused));
+    assert_eq!(
+        reason,
+        "this payment was already used for another instrument"
+    );
+}
+
+#[test]
+fn a_payment_used_by_one_company_cannot_back_another() {
+    let mut harness = seeded();
+    harness.company = CompanyId::new("globex").unwrap();
+    harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::CreateCompany {
+            key: public(COMPANY_SEED),
+        },
+    );
+    let digest = harness.propose(Event::TreasuryDesignated {
+        treasury: Treasury::new(TREASURY, TOKEN).unwrap(),
+    });
+    harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::Sign {
+            digest,
+            signature: sign_digest(COMPANY_SEED, &digest),
+        },
+    );
+
+    let reused = paid_reference("ben-safe", 500_000);
+    let reason = proposal_rejection(&mut harness, safe_paid_with("again", 500_000, &reused));
+    assert_eq!(
+        reason,
+        "this payment was already used for another instrument"
+    );
+}
+
+#[test]
+fn a_safe_needs_a_treasury_to_check_against() {
+    let mut harness = Harness::new();
+    let reason = proposal_rejection(&mut harness, safe("early", "ben", 1, Some(10), false));
+    assert_eq!(
+        reason,
+        "no treasury has been set, so the payment cannot be checked"
     );
 }

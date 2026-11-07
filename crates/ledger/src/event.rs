@@ -25,6 +25,33 @@ impl SettlementReference {
     }
 }
 
+/// Where investments must arrive, and in which token.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Treasury {
+    account: String,
+    token: String,
+}
+
+impl Treasury {
+    pub fn new(account: impl Into<String>, token: impl Into<String>) -> Result<Self, LedgerError> {
+        let (account, token) = (account.into(), token.into());
+        if account.trim().is_empty() || token.trim().is_empty() {
+            return Err(LedgerError::EmptyTreasury);
+        }
+        Ok(Self { account, token })
+    }
+
+    #[must_use]
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
 /// Where a holder wants to receive exit proceeds.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct PayoutDestination(String);
@@ -83,6 +110,9 @@ pub enum Event {
     ExitApproved {
         proceeds: Money,
     },
+    TreasuryDesignated {
+        treasury: Treasury,
+    },
 }
 
 impl Event {
@@ -106,7 +136,8 @@ impl Event {
         Ok(match self {
             Self::HolderRegistered { .. }
             | Self::OptionPoolResized { .. }
-            | Self::ExitApproved { .. } => Vec::new(),
+            | Self::ExitApproved { .. }
+            | Self::TreasuryDesignated { .. } => Vec::new(),
             Self::CommonIssued { holder, .. }
             | Self::SafeIssued { holder, .. }
             | Self::TokenWarrantIssued { holder, .. }
@@ -129,7 +160,8 @@ impl Event {
         match self {
             Self::HolderRegistered { .. }
             | Self::PayoutDestinationSet { .. }
-            | Self::ExitApproved { .. } => Ok(()),
+            | Self::ExitApproved { .. }
+            | Self::TreasuryDesignated { .. } => Ok(()),
             Self::CommonIssued {
                 instrument,
                 holder,

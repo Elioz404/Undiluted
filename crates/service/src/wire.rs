@@ -7,6 +7,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
+use crate::chain::ChainReader;
 use crate::gateway::Gateway;
 use crate::ports::{EnclaveSigner, Store};
 use crate::protocol::HeadAttestation;
@@ -54,14 +55,17 @@ impl From<HeadAttestation> for AnchorOutput {
 }
 
 /// Runs one call. Platforms only supply the input and print the output.
-pub fn run<S: Store, K: EnclaveSigner>(gateway: &mut Gateway<S, K>, input: &Input) -> Output {
+pub fn run<S: Store, K: EnclaveSigner, C: ChainReader>(
+    gateway: &mut Gateway<S, K, C>,
+    input: &Input,
+) -> Output {
     match input {
         Input::Identity => identity(gateway),
         Input::Request { envelope } => request(gateway, envelope),
     }
 }
 
-fn identity<S: Store, K: EnclaveSigner>(gateway: &Gateway<S, K>) -> Output {
+fn identity<S: Store, K: EnclaveSigner, C: ChainReader>(gateway: &Gateway<S, K, C>) -> Output {
     match gateway.signing_key() {
         Ok(signing_key) => Output::Identity {
             encryption_key: hex::encode(gateway.encryption_key()),
@@ -73,7 +77,10 @@ fn identity<S: Store, K: EnclaveSigner>(gateway: &Gateway<S, K>) -> Output {
     }
 }
 
-fn request<S: Store, K: EnclaveSigner>(gateway: &mut Gateway<S, K>, envelope: &str) -> Output {
+fn request<S: Store, K: EnclaveSigner, C: ChainReader>(
+    gateway: &mut Gateway<S, K, C>,
+    envelope: &str,
+) -> Output {
     let Ok(envelope) = STANDARD.decode(envelope) else {
         return Output::Error {
             message: "envelope is not valid base64".to_owned(),

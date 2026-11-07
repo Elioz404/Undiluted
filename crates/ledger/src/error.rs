@@ -27,6 +27,12 @@ pub enum LedgerError {
     MissingPayoutDestination(HolderId),
     #[error("this company has already approved an exit")]
     AlreadyExited,
+    #[error("this payment was already used for another instrument")]
+    SettlementReused,
+    #[error("treasury account and token must not be empty")]
+    EmptyTreasury,
+    #[error("the treasury is already set")]
+    TreasuryAlreadySet,
     #[error("failed to encode an event")]
     Encoding,
 }

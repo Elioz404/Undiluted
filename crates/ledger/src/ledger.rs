@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use undiluted_domain::{CapTable, CompanyId, HolderId, Money, Payout};
 
 use crate::crypto::{Digest, PublicKey};
 use crate::entry::{Draft, Entry, entry_digest, genesis_digest};
 use crate::error::LedgerError;
-use crate::event::{Event, PayoutDestination};
+use crate::event::{Event, PayoutDestination, Treasury};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerConfig {
@@ -21,6 +21,8 @@ struct State {
     payout_destinations: BTreeMap<HolderId, PayoutDestination>,
     table: CapTable,
     exit_proceeds: Option<Money>,
+    treasury: Option<Treasury>,
+    used_settlements: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +71,11 @@ impl Ledger {
     #[must_use]
     pub fn payout_destination(&self, holder: &HolderId) -> Option<&PayoutDestination> {
         self.state.payout_destinations.get(holder)
+    }
+
+    #[must_use]
+    pub const fn treasury(&self) -> Option<&Treasury> {
+        self.state.treasury.as_ref()
     }
 
     /// The approved exit, if there is one.
@@ -180,6 +187,17 @@ impl Ledger {
             } => {
                 next.payout_destinations
                     .insert(holder.clone(), destination.clone());
+            }
+            Event::SafeIssued { settlement, .. } => {
+                if !next.used_settlements.insert(settlement.as_str().to_owned()) {
+                    return Err(LedgerError::SettlementReused);
+                }
+            }
+            Event::TreasuryDesignated { treasury } => {
+                if next.treasury.is_some() {
+                    return Err(LedgerError::TreasuryAlreadySet);
+                }
+                next.treasury = Some(treasury.clone());
             }
             Event::ExitApproved { proceeds } => {
                 for payout in next.table.distribute(*proceeds)? {
@@ -308,7 +326,7 @@ mod tests {
                 SafeTerms::new(Some(usd(cap)), None, false).unwrap(),
             )
             .unwrap(),
-            settlement: SettlementReference::new("tx-1").unwrap(),
+            settlement: SettlementReference::new(format!("tx-{id}")).unwrap(),
         }
     }
 
@@ -732,6 +750,38 @@ mod tests {
         assert_eq!(
             PayoutDestination::new(" "),
             Err(LedgerError::EmptyPayoutDestination)
+        );
+    }
+
+    #[test]
+    fn one_payment_cannot_back_two_instruments() {
+        let ledger = funded_ledger();
+        let reused = Event::SafeIssued {
+            instrument: instrument("other"),
+            holder: holder("ben"),
+            safe: Safe::new(usd(1), SafeTerms::new(Some(usd(10)), None, false).unwrap()).unwrap(),
+            settlement: SettlementReference::new("tx-safe-ben").unwrap(),
+        };
+        assert_eq!(
+            ledger.draft(reused).unwrap_err(),
+            LedgerError::SettlementReused
+        );
+    }
+
+    #[test]
+    fn the_treasury_is_set_once() {
+        let mut ledger = funded_ledger();
+        let event = Event::TreasuryDesignated {
+            treasury: Treasury::new("treasury.near", "usdc.near").unwrap(),
+        };
+        let draft = ledger.draft(event.clone()).unwrap();
+        let company = sign(COMPANY_SEED, &draft.digest);
+        ledger.append(draft.seal(Some(company), vec![])).unwrap();
+
+        assert_eq!(ledger.treasury().unwrap().account(), "treasury.near");
+        assert_eq!(
+            ledger.draft(event).unwrap_err(),
+            LedgerError::TreasuryAlreadySet
         );
     }
 

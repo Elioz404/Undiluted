@@ -4,6 +4,7 @@ use borsh::{from_slice, to_vec};
 use undiluted_envelope::{EnclaveSecret, ReplyKey, open_request};
 use undiluted_ledger::PublicKey;
 
+use crate::chain::ChainReader;
 use crate::error::ServiceError;
 use crate::ports::{EnclaveSigner, Store, StoreError};
 use crate::protocol::{HeadAttestation, SignedRequest};
@@ -18,13 +19,13 @@ pub struct GatewayOutput {
 }
 
 #[derive(Debug)]
-pub struct Gateway<S, K> {
+pub struct Gateway<S, K, C> {
     secret: EnclaveSecret,
-    service: Service<S, K>,
+    service: Service<S, K, C>,
 }
 
-impl<S: Store, K: EnclaveSigner> Gateway<S, K> {
-    pub const fn new(secret: EnclaveSecret, service: Service<S, K>) -> Self {
+impl<S: Store, K: EnclaveSigner, C: ChainReader> Gateway<S, K, C> {
+    pub const fn new(secret: EnclaveSecret, service: Service<S, K, C>) -> Self {
         Self { secret, service }
     }
 

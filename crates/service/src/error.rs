@@ -30,6 +30,14 @@ pub enum ServiceError {
     WrongProposal,
     #[error("another run changed this company; retry")]
     Conflict,
+    #[error("no treasury has been set, so the payment cannot be checked")]
+    NoTreasury,
+    #[error("this payment was already used for another instrument")]
+    SettlementReused,
+    #[error("the payment could not be confirmed on chain: {0}")]
+    SettlementUnconfirmed(String),
+    #[error("the payment does not match: the treasury did not receive this amount of this token")]
+    SettlementMismatch,
     #[error("no exit has been approved")]
     NoExit,
     #[error("a payout has no destination")]

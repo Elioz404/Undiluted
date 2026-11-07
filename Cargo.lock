@@ -3145,6 +3145,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "serde",
+ "serde_json",
  "thiserror",
  "undiluted-domain",
  "undiluted-envelope",

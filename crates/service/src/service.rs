@@ -1,9 +1,11 @@
 use borsh::{BorshDeserialize, BorshSerialize, from_slice, to_vec};
 use undiluted_domain::{CompanyId, HolderId, Money};
 use undiluted_ledger::{
-    Digest, Draft, Entry, Event, HolderSignature, Ledger, LedgerConfig, PublicKey, SignatureBytes,
+    Digest, Draft, Entry, Event, HolderSignature, Ledger, LedgerConfig, PublicKey,
+    SettlementReference, SignatureBytes,
 };
 
+use crate::chain::ChainReader;
 use crate::error::ServiceError;
 use crate::ports::{EnclaveSigner, Store};
 use crate::protocol::{
@@ -39,14 +41,19 @@ impl Proposal {
 /// Handles authenticated requests. Every run rebuilds the ledger from storage,
 /// which re-verifies every signature and link before anything is trusted.
 #[derive(Debug)]
-pub struct Service<S, K> {
+pub struct Service<S, K, C> {
     store: S,
     signer: K,
+    chain: C,
 }
 
-impl<S: Store, K: EnclaveSigner> Service<S, K> {
-    pub const fn new(store: S, signer: K) -> Self {
-        Self { store, signer }
+impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
+    pub const fn new(store: S, signer: K, chain: C) -> Self {
+        Self {
+            store,
+            signer,
+            chain,
+        }
     }
 
     pub(crate) fn signing_key(&self) -> Result<PublicKey, crate::ports::StoreError> {
@@ -182,6 +189,7 @@ impl<S: Store, K: EnclaveSigner> Service<S, K> {
         }
         let draft = ledger.draft(event.clone())?;
         Self::ensure_may_propose(&request.actor, &draft)?;
+        self.verify_settlement(ledger, &draft.event)?;
 
         let proposal = Proposal {
             proposer: request.actor.clone(),
@@ -195,6 +203,52 @@ impl<S: Store, K: EnclaveSigner> Service<S, K> {
         let view = Self::view(ledger, &proposal)?;
         self.save_proposal(&request.company, &proposal)?;
         Ok(Response::Proposal(view))
+    }
+
+    /// A SAFE needs a real payment: the token's own contract must have recorded
+    /// this exact amount arriving at the treasury, and no other instrument of any
+    /// company in this enclave may already rely on the same payment.
+    fn verify_settlement(&self, ledger: &Ledger, event: &Event) -> Result<(), ServiceError> {
+        let Event::SafeIssued {
+            safe, settlement, ..
+        } = event
+        else {
+            return Ok(());
+        };
+        let treasury = ledger.treasury().ok_or(ServiceError::NoTreasury)?;
+        if self.store.get(&settlement_key(settlement))?.is_some() {
+            return Err(ServiceError::SettlementReused);
+        }
+        let transfers = self
+            .chain
+            .token_transfers(settlement.as_str())
+            .map_err(|error| ServiceError::SettlementUnconfirmed(error.0))?;
+        let arrived = transfers.iter().any(|transfer| {
+            transfer.token == treasury.token()
+                && transfer.to == treasury.account()
+                && transfer.amount == safe.purchase_amount()
+        });
+        if arrived {
+            Ok(())
+        } else {
+            Err(ServiceError::SettlementMismatch)
+        }
+    }
+
+    /// Claims a payment for this entry. A retry of the same entry may claim it
+    /// again, which keeps a run that failed halfway from locking the payment.
+    fn claim_settlement(&mut self, entry: &Entry, digest: &Digest) -> Result<(), ServiceError> {
+        let Event::SafeIssued { settlement, .. } = &entry.event else {
+            return Ok(());
+        };
+        let key = settlement_key(settlement);
+        if self.store.put_new(&key, digest.as_bytes())? {
+            return Ok(());
+        }
+        match self.store.get(&key)? {
+            Some(owner) if owner == digest.as_bytes() => Ok(()),
+            _ => Err(ServiceError::SettlementReused),
+        }
     }
 
     /// The company proposes anything; a holder only what is theirs alone to
@@ -268,6 +322,7 @@ impl<S: Store, K: EnclaveSigner> Service<S, K> {
         let sequence = proposal.sequence;
         let entry = proposal.into_entry();
         let head = ledger.append(entry.clone())?;
+        self.claim_settlement(&entry, &head)?;
 
         let encoded = to_vec(&entry).map_err(|_| ServiceError::Encoding)?;
         if !self
@@ -502,6 +557,10 @@ fn entry_key(company: &CompanyId, sequence: u64) -> String {
 
 fn proposal_key(company: &CompanyId) -> String {
     format!("company/{company}/proposal")
+}
+
+fn settlement_key(settlement: &SettlementReference) -> String {
+    format!("settlement/{}", settlement.as_str())
 }
 
 fn receipt_key(request: &Digest) -> String {
