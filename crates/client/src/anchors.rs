@@ -1,17 +1,15 @@
 //! Where heads are published so a company cannot rewrite its history.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::process::Command;
-
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use std::collections::BTreeMap;
 use undiluted_domain::CompanyId;
 use undiluted_ledger::{Digest, PublicKey, SignatureBytes};
 use undiluted_service::HeadAttestation;
 use undiluted_service::wire::AnchorOutput;
 
 use crate::error::ClientError;
+use crate::near_cli::{ContractCall, NearCli, view};
 
 pub trait AnchorRegistry {
     /// Ties a company to the enclave whose signature can extend its history.
@@ -95,12 +93,9 @@ impl AnchorRegistry for LocalAnchors {
 
 #[derive(Debug, Clone)]
 pub struct NearAnchorsConfig {
-    /// Path to the `near` command-line tool, which holds the signer's key.
-    pub near_cli: PathBuf,
+    /// Signs and pays for publishing.
+    pub near: NearCli,
     pub contract: String,
-    pub signer: String,
-    /// The network as `near` knows it, e.g. `testnet`.
-    pub network: String,
     pub rpc_url: String,
     /// NEAR to attach for storage. Whatever is not used comes back.
     pub deposit: String,
@@ -118,60 +113,17 @@ impl NearAnchors {
     }
 
     fn call(&self, method: &str, arguments: &serde_json::Value) -> Result<(), ClientError> {
-        let output = Command::new(&self.0.near_cli)
-            .args(["contract", "call-function", "as-transaction"])
-            .arg(&self.0.contract)
-            .arg(method)
-            .arg("json-args")
-            .arg(arguments.to_string())
-            .arg("prepaid-gas")
-            .arg(&self.0.prepaid_gas)
-            .arg("attached-deposit")
-            .arg(&self.0.deposit)
-            .arg("sign-as")
-            .arg(&self.0.signer)
-            .arg("network-config")
-            .arg(&self.0.network)
-            .args(["sign-with-keychain", "send"])
-            .output()
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        Err(ClientError::Anchor(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ))
-    }
-
-    fn view(
-        &self,
-        method: &str,
-        arguments: &serde_json::Value,
-    ) -> Result<serde_json::Value, ClientError> {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "query",
-            "params": {
-                "request_type": "call_function",
-                "finality": "final",
-                "account_id": self.0.contract,
-                "method_name": method,
-                "args_base64": STANDARD.encode(arguments.to_string()),
-            },
-        });
-        let answer: serde_json::Value = ureq::post(&self.0.rpc_url)
-            .send_json(request)
-            .map_err(|error| ClientError::Transport(error.to_string()))?
-            .into_json()
-            .map_err(|error| ClientError::Transport(error.to_string()))?;
-        let bytes: Vec<u8> = answer["result"]["result"]
-            .as_array()
-            .ok_or_else(|| ClientError::Anchor(format!("unexpected answer: {answer}")))?
-            .iter()
-            .filter_map(|byte| byte.as_u64().and_then(|byte| u8::try_from(byte).ok()))
-            .collect();
-        serde_json::from_slice(&bytes).map_err(|error| ClientError::Anchor(error.to_string()))
+        self.0
+            .near
+            .call(&ContractCall {
+                contract: &self.0.contract,
+                method,
+                arguments,
+                gas: &self.0.prepaid_gas,
+                deposit: &self.0.deposit,
+            })
+            .map(|_| ())
+            .map_err(ClientError::Anchor)
     }
 }
 
@@ -209,7 +161,9 @@ impl AnchorRegistry for NearAnchors {
         company: &CompanyId,
         sequence: u64,
     ) -> Result<Option<String>, ClientError> {
-        let head = self.view(
+        let head = view(
+            &self.0.rpc_url,
+            &self.0.contract,
             "head_at",
             &serde_json::json!({ "company_id": company.as_str(), "sequence": sequence }),
         )?;

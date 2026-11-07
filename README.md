@@ -23,9 +23,12 @@ commitment to its history.
 - **Messages are encrypted end to end.** Inputs and outputs of on-chain runs are
   public, so each request and reply is encrypted between the client and the
   enclave, and padded so its size says nothing about what it carries.
-- **Heads are anchored on NEAR.** The anchor contract only accepts sequences in
-  order and never replaces a recorded head, so a company cannot show two different
-  histories to two different investors.
+- **Heads are anchored on NEAR.** The anchor contract accepts a head only with the
+  enclave's signature, only in order, and never replaces one. Anyone can relay it,
+  but nobody can forge it, and investors can compare the head in their statement
+  with the published one.
+- **Investments settle through NEAR Intents.** An investor pays through the 1Click
+  API and the SAFE records what the treasury actually received.
 
 The rules use integer arithmetic only: replaying the same events gives the same
 result on any machine.
@@ -99,10 +102,22 @@ sees it:
 outlayer secrets set --generate PROTECTED_ENCLAVE_KEY:hex32 --project OWNER/PROJECT
 ```
 
-Then run the same demo against it, on testnet:
+Build and deploy the anchor contract, for example to `anchor.OWNER`:
 
 ```bash
-cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-account OWNER --anchor-contract CONTRACT --anchor-signer OWNER
+RUSTFLAGS='-C target-cpu=mvp -C link-arg=-s' cargo build -p undiluted-anchor --target wasm32-unknown-unknown --release
+```
+
+Then run the same demo against both, with test payments through
+[Tidepool](https://www.usetidepool.tech), a community-run 1Click sandbox on testnet.
+Get free test tokens from its faucet first:
+
+```bash
+curl -X POST https://www.usetidepool.tech/v0/faucet -H 'content-type: application/json' -d '{"accountId":"OWNER","mode":"wallet"}'
+```
+
+```bash
+cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-account OWNER --anchor-contract anchor.OWNER --signer OWNER --treasury TREASURY --payment-api https://www.usetidepool.tech --origin-asset nep141:usdt.tidepool-sandbox.testnet --destination-asset nep141:usdc.tidepool-sandbox.testnet
 ```
 
 ## Rules and their limits
@@ -116,6 +131,12 @@ cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-ac
 - One deployment serves its calls through one relay account, because the enclave's
   storage is bound to the account that signs the call.
 - Anchors reveal a company identifier and how many events it has recorded.
+- Test payments run on Tidepool, a third-party sandbox that is not affiliated with
+  NEAR and whose test tokens have no value. NEAR Intents has no official testnet.
+- Payments in the demo start from a NEAR account. The enclave records the settlement
+  reference the parties sign; it does not check the payment on chain.
+- A settlement does not hide amounts: deposits on the paying chain stay visible. What
+  stays private is the cap table.
 - Confidentiality depends on the TEE and on OutLayer's platform; see
   [what its operator can and cannot do](https://github.com/out-layer/outlayer/blob/main/docs/NON_CUSTODIAL.md).
 - The ledger protects what is recorded in it. It cannot stop a founder from signing

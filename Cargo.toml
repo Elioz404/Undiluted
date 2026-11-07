@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive"] }
 ed25519-dalek = "2"
 getrandom = "0.2"
 hex = "0.4"
+humantime = "2"
 hkdf = "0.12"
 near-sdk = "5.30"
 primitive-types = { version = "0.13", default-features = false }

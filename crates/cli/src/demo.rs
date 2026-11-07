@@ -1,7 +1,9 @@
 //! A fictional raise: a founder, two investors and an MFN clause that enforces
 //! itself. Every party signs with its own key and sees only what it may see.
 
-use undiluted_client::{AnchorRegistry, Client, ClientError, Party, Transport};
+use undiluted_client::{
+    AnchorRegistry, Client, ClientError, Party, PaymentRail, Settlement, Transport,
+};
 use undiluted_domain::{
     CompanyId, HolderId, InstrumentId, MfnOffer, Money, Ownership, Ratio, Safe, SafeTerms, Shares,
 };
@@ -14,10 +16,9 @@ const RATIO_PER_BASIS_POINT: u128 = 100_000_000_000_000;
 const MAX_ATTEMPTS: u32 = 8;
 
 const FOUNDER_SHARES: u128 = 8_000_000;
-const ANA_INVESTMENT: u128 = 250_000;
-const BEN_INVESTMENT: u128 = 500_000;
-const BEN_POST_MONEY_CAP: u128 = 5_000_000;
-const DEMO_SETTLEMENT: &str = "demo-settlement";
+const ANA_INVESTMENT: u128 = 10;
+const BEN_INVESTMENT: u128 = 20;
+const BEN_POST_MONEY_CAP: u128 = 200;
 const FORGED_HEAD: [u8; 32] = [0xab; 32];
 const FORGED_SIGNATURE: [u8; 64] = [0xcd; 64];
 
@@ -40,9 +41,10 @@ impl Member {
     }
 }
 
-struct Demo<T, R> {
+struct Demo<T, R, P> {
     client: Client<T>,
     anchors: R,
+    rail: P,
     company_id: CompanyId,
     company: Party,
     founder: Member,
@@ -50,8 +52,12 @@ struct Demo<T, R> {
     ben: Member,
 }
 
-pub fn run<T: Transport, R: AnchorRegistry>(transport: T, anchors: R) -> Result<(), ClientError> {
-    let mut demo = Demo::connect(transport, anchors)?;
+pub fn run<T: Transport, R: AnchorRegistry, P: PaymentRail>(
+    transport: T,
+    anchors: R,
+    rail: P,
+) -> Result<(), ClientError> {
+    let mut demo = Demo::connect(transport, anchors, rail)?;
     demo.incorporate()?;
     demo.raise()?;
     let offer = demo.discover_better_terms()?;
@@ -62,8 +68,8 @@ pub fn run<T: Transport, R: AnchorRegistry>(transport: T, anchors: R) -> Result<
     Ok(())
 }
 
-impl<T: Transport, R: AnchorRegistry> Demo<T, R> {
-    fn connect(transport: T, anchors: R) -> Result<Self, ClientError> {
+impl<T: Transport, R: AnchorRegistry, P: PaymentRail> Demo<T, R, P> {
+    fn connect(transport: T, anchors: R, rail: P) -> Result<Self, ClientError> {
         let company = Party::generate()?;
         let suffix = hex::encode(&company.public_key().as_bytes()[..4]);
         let company_id = CompanyId::new(format!("demo-{suffix}"))?;
@@ -75,6 +81,7 @@ impl<T: Transport, R: AnchorRegistry> Demo<T, R> {
         Ok(Self {
             client,
             anchors,
+            rail,
             company_id,
             company,
             founder: Member::new("founder")?,
@@ -121,8 +128,9 @@ impl<T: Transport, R: AnchorRegistry> Demo<T, R> {
     }
 
     fn raise(&mut self) -> Result<(), ClientError> {
-        step("Ana invests with an uncapped SAFE that has an MFN clause");
-        let event = issue_safe("safe-ana", &self.ana, ANA_INVESTMENT, None, true)?;
+        step("Ana pays into the treasury and receives an uncapped SAFE with an MFN clause");
+        let settlement = self.pay(ANA_INVESTMENT)?;
+        let event = issue_safe("safe-ana", &self.ana, settlement, None, true)?;
         let (party, actor) = (self.ana.party.clone(), self.ana.actor());
         self.commit(event, &party, actor)?;
         print_statement(
@@ -130,16 +138,27 @@ impl<T: Transport, R: AnchorRegistry> Demo<T, R> {
             &self.client.statement(&self.ana.party, self.ana.actor())?,
         );
 
-        step("Ben invests later at a $5M post-money cap: better terms than Ana has");
+        step("Ben pays later, at a post-money cap: better terms than Ana has");
+        let settlement = self.pay(BEN_INVESTMENT)?;
         let event = issue_safe(
             "safe-ben",
             &self.ben,
-            BEN_INVESTMENT,
+            settlement,
             Some(BEN_POST_MONEY_CAP),
             false,
         )?;
         let (party, actor) = (self.ben.party.clone(), self.ben.actor());
         self.commit(event, &party, actor)
+    }
+
+    fn pay(&mut self, dollars: u128) -> Result<Settlement, ClientError> {
+        let settlement = self.rail.pay(usd(dollars))?;
+        println!(
+            "  Paid {dollars}, treasury received {:.2}, settlement {}",
+            as_dollars(settlement.received),
+            settlement.reference
+        );
+        Ok(settlement)
     }
 
     fn discover_better_terms(&mut self) -> Result<MfnOffer, ClientError> {
@@ -279,10 +298,15 @@ fn usd(dollars: u128) -> Money {
     Money::new(dollars * MICROS_PER_DOLLAR)
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn as_dollars(amount: Money) -> f64 {
+    amount.value() as f64 / MICROS_PER_DOLLAR as f64
+}
+
 fn issue_safe(
     id: &str,
     holder: &Member,
-    purchase: u128,
+    settlement: Settlement,
     cap: Option<u128>,
     mfn: bool,
 ) -> Result<Event, ClientError> {
@@ -290,8 +314,8 @@ fn issue_safe(
     Ok(Event::SafeIssued {
         instrument: InstrumentId::new(id)?,
         holder: holder.id.clone(),
-        safe: Safe::new(usd(purchase), terms)?,
-        settlement: SettlementReference::new(DEMO_SETTLEMENT)?,
+        safe: Safe::new(settlement.received, terms)?,
+        settlement: SettlementReference::new(settlement.reference)?,
     })
 }
 
