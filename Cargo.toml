@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain"]
+members = ["crates/domain", "crates/ledger"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,9 +9,12 @@ license = "MIT"
 
 [workspace.dependencies]
 borsh = { version = "1", features = ["derive"] }
+ed25519-dalek = "2"
 primitive-types = { version = "0.13", default-features = false }
 proptest = "1"
+sha2 = "0.10"
 thiserror = "2"
+undiluted-domain = { path = "crates/domain" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
