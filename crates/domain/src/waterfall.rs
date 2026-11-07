@@ -8,6 +8,8 @@
 //! Unissued options and token warrants receive nothing. A SAFE with no
 //! valuation cap can only take its money back.
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::cap_table::{CapTable, Holding, Position};
 use crate::error::CapTableError;
 use crate::ids::{HolderId, InstrumentId};
@@ -15,13 +17,13 @@ use crate::math::{allocate_pro_rata, compare_fractions};
 use crate::quantity::Money;
 use core::cmp::Ordering;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum PayoutBasis {
     Preference,
     AsConverted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Payout {
     pub instrument: InstrumentId,
     pub holder: HolderId,

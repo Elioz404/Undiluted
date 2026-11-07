@@ -21,6 +21,12 @@ pub enum LedgerError {
     InvalidCompanySignature { sequence: u64 },
     #[error("settlement reference must not be empty")]
     EmptySettlementReference,
+    #[error("payout destination must not be empty")]
+    EmptyPayoutDestination,
+    #[error("holder {0} has not chosen where to be paid")]
+    MissingPayoutDestination(HolderId),
+    #[error("this company has already approved an exit")]
+    AlreadyExited,
     #[error("failed to encode an event")]
     Encoding,
 }

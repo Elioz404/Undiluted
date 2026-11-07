@@ -1,16 +1,26 @@
 use std::collections::BTreeMap;
 
-use undiluted_domain::{CapTable, CompanyId, HolderId};
+use undiluted_domain::{CapTable, CompanyId, HolderId, Money, Payout};
 
 use crate::crypto::{Digest, PublicKey};
 use crate::entry::{Draft, Entry, entry_digest, genesis_digest};
 use crate::error::LedgerError;
-use crate::event::Event;
+use crate::event::{Event, PayoutDestination};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerConfig {
     pub company: CompanyId,
     pub company_key: PublicKey,
+}
+
+/// What replaying the events produces. An event applies to a copy, so a
+/// rejected one leaves everything untouched.
+#[derive(Debug, Clone, Default)]
+struct State {
+    holder_keys: BTreeMap<HolderId, PublicKey>,
+    payout_destinations: BTreeMap<HolderId, PayoutDestination>,
+    table: CapTable,
+    exit_proceeds: Option<Money>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,8 +29,7 @@ pub struct Ledger {
     entries: Vec<Entry>,
     heads: Vec<Digest>,
     genesis: Digest,
-    holder_keys: BTreeMap<HolderId, PublicKey>,
-    table: CapTable,
+    state: State,
 }
 
 impl Ledger {
@@ -31,8 +40,7 @@ impl Ledger {
             entries: Vec::new(),
             heads: Vec::new(),
             genesis,
-            holder_keys: BTreeMap::new(),
-            table: CapTable::new(),
+            state: State::default(),
         })
     }
 
@@ -55,12 +63,32 @@ impl Ledger {
 
     #[must_use]
     pub fn holder_key(&self, holder: &HolderId) -> Option<PublicKey> {
-        self.holder_keys.get(holder).copied()
+        self.state.holder_keys.get(holder).copied()
+    }
+
+    #[must_use]
+    pub fn payout_destination(&self, holder: &HolderId) -> Option<&PayoutDestination> {
+        self.state.payout_destinations.get(holder)
+    }
+
+    /// The approved exit, if there is one.
+    #[must_use]
+    pub const fn exit_proceeds(&self) -> Option<Money> {
+        self.state.exit_proceeds
+    }
+
+    /// Every payout of the approved exit, if there is one.
+    pub fn exit_payouts(&self) -> Result<Option<Vec<Payout>>, LedgerError> {
+        self.state
+            .exit_proceeds
+            .map(|proceeds| self.state.table.distribute(proceeds))
+            .transpose()
+            .map_err(LedgerError::from)
     }
 
     #[must_use]
     pub const fn table(&self) -> &CapTable {
-        &self.table
+        &self.state.table
     }
 
     #[must_use]
@@ -86,7 +114,7 @@ impl Ledger {
     /// Prepares `event` for signing, rejecting it early if it could not apply.
     pub fn draft(&self, event: Event) -> Result<Draft, LedgerError> {
         self.state_after(&event)?;
-        let required_holders = event.affected_holders(&self.table)?;
+        let required_holders = event.affected_holders(&self.state.table)?;
         let company_must_sign = event.requires_company_signature();
         let sequence = self.next_sequence();
         let previous = self.head();
@@ -123,12 +151,7 @@ impl Ledger {
             &entry.event,
         )?;
         self.verify_signatures(&entry, &digest)?;
-        let (table, new_holder) = self.state_after(&entry.event)?;
-
-        self.table = table;
-        if let Some((holder, key)) = new_holder {
-            self.holder_keys.insert(holder, key);
-        }
+        self.state = self.state_after(&entry.event)?;
         self.entries.push(entry);
         self.heads.push(digest);
         Ok(digest)
@@ -138,22 +161,39 @@ impl Ledger {
         self.entries.len() as u64
     }
 
-    fn state_after(
-        &self,
-        event: &Event,
-    ) -> Result<(CapTable, Option<(HolderId, PublicKey)>), LedgerError> {
-        let new_holder = match event {
+    fn state_after(&self, event: &Event) -> Result<State, LedgerError> {
+        if self.state.exit_proceeds.is_some() {
+            return Err(LedgerError::AlreadyExited);
+        }
+        let mut next = self.state.clone();
+        event.apply_to(&mut next.table)?;
+        match event {
             Event::HolderRegistered { holder, key } => {
-                if self.holder_keys.contains_key(holder) {
+                if next.holder_keys.contains_key(holder) {
                     return Err(LedgerError::HolderAlreadyRegistered(holder.clone()));
                 }
-                Some((holder.clone(), *key))
+                next.holder_keys.insert(holder.clone(), *key);
             }
-            _ => None,
-        };
-        let mut table = self.table.clone();
-        event.apply_to(&mut table)?;
-        Ok((table, new_holder))
+            Event::PayoutDestinationSet {
+                holder,
+                destination,
+            } => {
+                next.payout_destinations
+                    .insert(holder.clone(), destination.clone());
+            }
+            Event::ExitApproved { proceeds } => {
+                for payout in next.table.distribute(*proceeds)? {
+                    if !payout.amount.is_zero()
+                        && !next.payout_destinations.contains_key(&payout.holder)
+                    {
+                        return Err(LedgerError::MissingPayoutDestination(payout.holder));
+                    }
+                }
+                next.exit_proceeds = Some(*proceeds);
+            }
+            _ => {}
+        }
+        Ok(next)
     }
 
     fn verify_signatures(&self, entry: &Entry, digest: &Digest) -> Result<(), LedgerError> {
@@ -196,10 +236,11 @@ impl Ledger {
             return Ok(vec![(holder.clone(), *key)]);
         }
         event
-            .affected_holders(&self.table)?
+            .affected_holders(&self.state.table)?
             .into_iter()
             .map(|holder| {
                 let key = self
+                    .state
                     .holder_keys
                     .get(&holder)
                     .copied()
@@ -610,6 +651,87 @@ mod tests {
         assert_eq!(
             ledger.append(draft.seal(None, vec![])).unwrap_err(),
             LedgerError::InvalidCompanySignature { sequence }
+        );
+    }
+
+    fn set_destination(ledger: &mut Ledger, name: &str, seed: u8) {
+        let event = Event::PayoutDestinationSet {
+            holder: holder(name),
+            destination: PayoutDestination::new(format!("{name}.near")).unwrap(),
+        };
+        let draft = ledger.draft(event).unwrap();
+        assert!(!draft.company_must_sign);
+        let signature = HolderSignature {
+            holder: holder(name),
+            signature: sign(seed, &draft.digest),
+        };
+        ledger.append(draft.seal(None, vec![signature])).unwrap();
+    }
+
+    fn exit(proceeds: u128) -> Event {
+        Event::ExitApproved {
+            proceeds: usd(proceeds),
+        }
+    }
+
+    #[test]
+    fn an_exit_needs_everyone_who_gets_paid_to_have_a_destination() {
+        let mut ledger = funded_ledger();
+        set_destination(&mut ledger, "ana", ANA_SEED);
+
+        assert_eq!(
+            ledger.draft(exit(50_000_000)).unwrap_err(),
+            LedgerError::MissingPayoutDestination(holder("ben"))
+        );
+    }
+
+    #[test]
+    fn an_approved_exit_gives_the_payouts_and_closes_the_ledger() {
+        let mut ledger = funded_ledger();
+        set_destination(&mut ledger, "ana", ANA_SEED);
+        set_destination(&mut ledger, "ben", BEN_SEED);
+        assert_eq!(ledger.exit_payouts().unwrap(), None);
+
+        let draft = ledger.draft(exit(50_000_000)).unwrap();
+        assert_eq!(draft.required_holders.len(), 0);
+        let company = sign(COMPANY_SEED, &draft.digest);
+        ledger.append(draft.seal(Some(company), vec![])).unwrap();
+
+        let payouts = ledger.exit_payouts().unwrap().unwrap();
+        let total: u128 = payouts.iter().map(|payout| payout.amount.value()).sum();
+        assert_eq!(total, usd(50_000_000).value());
+        assert_eq!(
+            ledger.draft(exit(1)).unwrap_err(),
+            LedgerError::AlreadyExited
+        );
+    }
+
+    #[test]
+    fn replay_rebuilds_destinations_and_the_exit() {
+        let mut ledger = funded_ledger();
+        set_destination(&mut ledger, "ana", ANA_SEED);
+        set_destination(&mut ledger, "ben", BEN_SEED);
+        let draft = ledger.draft(exit(50_000_000)).unwrap();
+        let company = sign(COMPANY_SEED, &draft.digest);
+        ledger.append(draft.seal(Some(company), vec![])).unwrap();
+
+        let replayed = Ledger::replay(config(), ledger.entries().to_vec()).unwrap();
+
+        assert_eq!(replayed.exit_proceeds(), Some(usd(50_000_000)));
+        assert_eq!(
+            replayed
+                .payout_destination(&holder("ben"))
+                .unwrap()
+                .as_str(),
+            "ben.near"
+        );
+    }
+
+    #[test]
+    fn a_blank_destination_is_refused() {
+        assert_eq!(
+            PayoutDestination::new(" "),
+            Err(LedgerError::EmptyPayoutDestination)
         );
     }
 

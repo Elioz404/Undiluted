@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use undiluted_domain::{
-    BasisPoints, CapTable, CapTableError, HolderId, InstrumentId, PricedRound, Safe, Shares,
+    BasisPoints, CapTable, CapTableError, HolderId, InstrumentId, Money, PricedRound, Safe, Shares,
 };
 
 use crate::crypto::PublicKey;
@@ -15,6 +15,25 @@ impl SettlementReference {
         let value = value.into();
         if value.trim().is_empty() {
             return Err(LedgerError::EmptySettlementReference);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Where a holder wants to receive exit proceeds.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct PayoutDestination(String);
+
+impl PayoutDestination {
+    pub fn new(value: impl Into<String>) -> Result<Self, LedgerError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(LedgerError::EmptyPayoutDestination);
         }
         Ok(Self(value))
     }
@@ -57,14 +76,25 @@ pub enum Event {
     RoundClosed {
         round: PricedRound,
     },
+    PayoutDestinationSet {
+        holder: HolderId,
+        destination: PayoutDestination,
+    },
+    ExitApproved {
+        proceeds: Money,
+    },
 }
 
 impl Event {
     /// An MFN election exercises a right the company granted when it issued the
-    /// SAFE, so the company cannot withhold it. The rules still validate it.
+    /// SAFE, so the company cannot withhold it. Where a holder gets paid is the
+    /// holder's own business. The rules still validate both.
     #[must_use]
     pub const fn requires_company_signature(&self) -> bool {
-        !matches!(self, Self::MfnElected { .. })
+        !matches!(
+            self,
+            Self::MfnElected { .. } | Self::PayoutDestinationSet { .. }
+        )
     }
 
     /// Holders whose rights this event creates or changes, who must therefore
@@ -74,10 +104,13 @@ impl Event {
         table: &CapTable,
     ) -> Result<Vec<HolderId>, CapTableError> {
         Ok(match self {
-            Self::HolderRegistered { .. } | Self::OptionPoolResized { .. } => Vec::new(),
+            Self::HolderRegistered { .. }
+            | Self::OptionPoolResized { .. }
+            | Self::ExitApproved { .. } => Vec::new(),
             Self::CommonIssued { holder, .. }
             | Self::SafeIssued { holder, .. }
-            | Self::TokenWarrantIssued { holder, .. } => vec![holder.clone()],
+            | Self::TokenWarrantIssued { holder, .. }
+            | Self::PayoutDestinationSet { holder, .. } => vec![holder.clone()],
             Self::MfnElected { target, .. } => vec![table.holding(target)?.holder().clone()],
             Self::RoundClosed { round } => {
                 let mut holders: Vec<HolderId> = round
@@ -94,7 +127,9 @@ impl Event {
 
     pub(crate) fn apply_to(&self, table: &mut CapTable) -> Result<(), CapTableError> {
         match self {
-            Self::HolderRegistered { .. } => Ok(()),
+            Self::HolderRegistered { .. }
+            | Self::PayoutDestinationSet { .. }
+            | Self::ExitApproved { .. } => Ok(()),
             Self::CommonIssued {
                 instrument,
                 holder,
