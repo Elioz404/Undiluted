@@ -13,7 +13,7 @@ pub mod quantity;
 pub mod safe;
 pub mod waterfall;
 
-pub use cap_table::{CapTable, Holding, Position};
+pub use cap_table::{CapTable, Holding, MfnOffer, Position};
 pub use conversion::{NewInvestment, PreferredIssuance, PricedRound, RoundOutcome};
 pub use error::CapTableError;
 pub use ids::{CompanyId, HolderId, InstrumentId};

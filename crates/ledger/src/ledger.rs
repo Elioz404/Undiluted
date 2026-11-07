@@ -49,6 +49,16 @@ impl Ledger {
     }
 
     #[must_use]
+    pub const fn config(&self) -> &LedgerConfig {
+        &self.config
+    }
+
+    #[must_use]
+    pub fn holder_key(&self, holder: &HolderId) -> Option<PublicKey> {
+        self.holder_keys.get(holder).copied()
+    }
+
+    #[must_use]
     pub const fn table(&self) -> &CapTable {
         &self.table
     }
@@ -77,6 +87,7 @@ impl Ledger {
     pub fn draft(&self, event: Event) -> Result<Draft, LedgerError> {
         self.state_after(&event)?;
         let required_holders = event.affected_holders(&self.table)?;
+        let company_must_sign = event.requires_company_signature();
         let sequence = self.next_sequence();
         let previous = self.head();
         let digest = entry_digest(&self.config.company, sequence, &previous, &event)?;
@@ -85,6 +96,7 @@ impl Ledger {
             previous,
             event,
             digest,
+            company_must_sign,
             required_holders,
         })
     }
@@ -145,14 +157,15 @@ impl Ledger {
     }
 
     fn verify_signatures(&self, entry: &Entry, digest: &Digest) -> Result<(), LedgerError> {
-        if !self
-            .config
-            .company_key
-            .verifies(digest, &entry.company_signature)
-        {
-            return Err(LedgerError::InvalidCompanySignature {
-                sequence: entry.sequence,
-            });
+        if entry.event.requires_company_signature() {
+            let signed = entry
+                .company_signature
+                .is_some_and(|signature| self.config.company_key.verifies(digest, &signature));
+            if !signed {
+                return Err(LedgerError::InvalidCompanySignature {
+                    sequence: entry.sequence,
+                });
+            }
         }
         for (holder, key) in self.required_signers(&entry.event)? {
             let signature = entry
@@ -173,7 +186,11 @@ impl Ledger {
         Ok(())
     }
 
-    fn required_signers(&self, event: &Event) -> Result<Vec<(HolderId, PublicKey)>, LedgerError> {
+    /// The holders who must co-sign `event`, with the key each must sign with.
+    pub fn required_signers(
+        &self,
+        event: &Event,
+    ) -> Result<Vec<(HolderId, PublicKey)>, LedgerError> {
         // A new holder proves control of the key being registered.
         if let Event::HolderRegistered { holder, key } = event {
             return Ok(vec![(holder.clone(), *key)]);
@@ -265,7 +282,9 @@ mod tests {
                 signature: sign(*seed, &draft.digest),
             })
             .collect();
-        ledger.append(draft.seal(company, signatures)).unwrap()
+        ledger
+            .append(draft.seal(Some(company), signatures))
+            .unwrap()
     }
 
     fn register(ledger: &mut Ledger, name: &str, seed: u8) {
@@ -395,7 +414,9 @@ mod tests {
         let sequence = draft.sequence;
 
         assert_eq!(
-            ledger.append(draft.seal(company, vec![])).unwrap_err(),
+            ledger
+                .append(draft.seal(Some(company), vec![]))
+                .unwrap_err(),
             LedgerError::MissingHolderSignature {
                 sequence,
                 holder: holder("ben"),
@@ -416,7 +437,7 @@ mod tests {
 
         assert_eq!(
             ledger
-                .append(draft.seal(company, vec![forged]))
+                .append(draft.seal(Some(company), vec![forged]))
                 .unwrap_err(),
             LedgerError::InvalidHolderSignature {
                 sequence,
@@ -437,7 +458,7 @@ mod tests {
         let sequence = draft.sequence;
 
         assert_eq!(
-            ledger.append(draft.seal(forged, vec![])).unwrap_err(),
+            ledger.append(draft.seal(Some(forged), vec![])).unwrap_err(),
             LedgerError::InvalidCompanySignature { sequence }
         );
     }
@@ -458,7 +479,7 @@ mod tests {
         };
 
         assert!(matches!(
-            ledger.append(draft.seal(company, vec![wrong])),
+            ledger.append(draft.seal(Some(company), vec![wrong])),
             Err(LedgerError::InvalidHolderSignature { .. })
         ));
     }
@@ -484,7 +505,9 @@ mod tests {
         let company = sign(COMPANY_SEED, &draft.digest);
 
         assert_eq!(
-            ledger.append(draft.seal(company, vec![])).unwrap_err(),
+            ledger
+                .append(draft.seal(Some(company), vec![]))
+                .unwrap_err(),
             LedgerError::UnknownHolder(holder("stranger"))
         );
     }
@@ -509,9 +532,85 @@ mod tests {
             .unwrap();
         let forged = sign(MALLORY_SEED, &draft.digest);
 
-        assert!(ledger.append(draft.seal(forged, vec![])).is_err());
+        assert!(ledger.append(draft.seal(Some(forged), vec![])).is_err());
         assert_eq!(ledger.head(), head);
         assert_eq!(ledger.table().option_pool(), Shares::ZERO);
+    }
+
+    fn mfn_ledger() -> Ledger {
+        let mut ledger = funded_ledger();
+        commit(
+            &mut ledger,
+            Event::SafeIssued {
+                instrument: instrument("mfn"),
+                holder: holder("ana"),
+                safe: Safe::new(usd(100), SafeTerms::new(None, None, true).unwrap()).unwrap(),
+                settlement: SettlementReference::new("tx-2").unwrap(),
+            },
+            &[("ana", ANA_SEED)],
+        );
+        commit(
+            &mut ledger,
+            safe_event("later", "ben", 100, 1_000_000),
+            &[("ben", BEN_SEED)],
+        );
+        ledger
+    }
+
+    fn election() -> Event {
+        Event::MfnElected {
+            target: instrument("mfn"),
+            source: instrument("later"),
+        }
+    }
+
+    #[test]
+    fn a_holder_exercises_mfn_without_the_company() {
+        let mut ledger = mfn_ledger();
+        let draft = ledger.draft(election()).unwrap();
+        assert!(!draft.company_must_sign);
+        let signature = HolderSignature {
+            holder: holder("ana"),
+            signature: sign(ANA_SEED, &draft.digest),
+        };
+
+        ledger.append(draft.seal(None, vec![signature])).unwrap();
+
+        assert_eq!(ledger.table().mfn_offers(&holder("ana")).len(), 0);
+    }
+
+    #[test]
+    fn the_company_cannot_exercise_mfn_for_a_holder() {
+        let mut ledger = mfn_ledger();
+        let draft = ledger.draft(election()).unwrap();
+        let company = sign(COMPANY_SEED, &draft.digest);
+        let sequence = draft.sequence;
+
+        assert_eq!(
+            ledger
+                .append(draft.seal(Some(company), vec![]))
+                .unwrap_err(),
+            LedgerError::MissingHolderSignature {
+                sequence,
+                holder: holder("ana"),
+            }
+        );
+    }
+
+    #[test]
+    fn other_events_still_require_the_company() {
+        let mut ledger = funded_ledger();
+        let draft = ledger
+            .draft(Event::OptionPoolResized {
+                shares: Shares::new(1),
+            })
+            .unwrap();
+        let sequence = draft.sequence;
+
+        assert_eq!(
+            ledger.append(draft.seal(None, vec![])).unwrap_err(),
+            LedgerError::InvalidCompanySignature { sequence }
+        );
     }
 
     #[test]

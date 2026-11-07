@@ -51,6 +51,15 @@ impl Holding {
     }
 }
 
+/// Better terms a holder may adopt. It names the terms and the instrument they
+/// came from, but not who holds that instrument or how much they invested.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct MfnOffer {
+    pub target: InstrumentId,
+    pub source: InstrumentId,
+    pub terms: SafeTerms,
+}
+
 /// Instruments are kept in issuance order, which MFN rights depend on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CapTable {
@@ -168,6 +177,32 @@ impl CapTable {
                 _ => false,
             })
             .collect())
+    }
+
+    /// Every MFN election currently open to `holder`.
+    #[must_use]
+    pub fn mfn_offers(&self, holder: &HolderId) -> Vec<MfnOffer> {
+        let mut offers = Vec::new();
+        for (index, holding) in self.holdings.iter().enumerate() {
+            let Position::Safe(safe) = &holding.position else {
+                continue;
+            };
+            if &holding.holder != holder || !safe.terms().has_mfn_clause() {
+                continue;
+            }
+            for later in &self.holdings[index + 1..] {
+                if let Position::Safe(later_safe) = &later.position
+                    && later_safe.terms().improves_on(safe.terms())
+                {
+                    offers.push(MfnOffer {
+                        target: holding.id.clone(),
+                        source: later.id.clone(),
+                        terms: *later_safe.terms(),
+                    });
+                }
+            }
+        }
+        offers
     }
 
     /// Exercises the MFN clause of `target`, adopting the terms of `source`.
@@ -337,6 +372,50 @@ mod tests {
         let beneficiaries = table.mfn_beneficiaries(&instrument("later")).unwrap();
         let ids: Vec<&str> = beneficiaries.iter().map(|h| h.id().as_str()).collect();
         assert_eq!(ids, ["mfn"]);
+    }
+
+    #[test]
+    fn offers_name_the_terms_for_the_holder_who_can_elect() {
+        let mut table = CapTable::new();
+        table
+            .issue_safe(instrument("mfn"), holder("ana"), safe(100, None, true))
+            .unwrap();
+        table
+            .issue_safe(
+                instrument("later"),
+                holder("eve"),
+                safe(100, Some(10), false),
+            )
+            .unwrap();
+
+        let offers = table.mfn_offers(&holder("ana"));
+
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].target, instrument("mfn"));
+        assert_eq!(offers[0].source, instrument("later"));
+        assert_eq!(offers[0].terms, terms_of(&table, "later"));
+        assert_eq!(table.mfn_offers(&holder("eve")).len(), 0);
+    }
+
+    #[test]
+    fn an_election_uses_up_the_offer() {
+        let mut table = CapTable::new();
+        table
+            .issue_safe(instrument("mfn"), holder("ana"), safe(100, None, true))
+            .unwrap();
+        table
+            .issue_safe(
+                instrument("later"),
+                holder("eve"),
+                safe(100, Some(10), false),
+            )
+            .unwrap();
+
+        table
+            .elect_mfn(&instrument("mfn"), &instrument("later"))
+            .unwrap();
+
+        assert_eq!(table.mfn_offers(&holder("ana")).len(), 0);
     }
 
     #[test]

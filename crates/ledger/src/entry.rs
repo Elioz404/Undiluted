@@ -21,7 +21,8 @@ pub struct Draft {
     pub previous: Digest,
     pub event: Event,
     pub digest: Digest,
-    /// Holders who must co-sign, besides the company.
+    pub company_must_sign: bool,
+    /// Holders who must co-sign.
     pub required_holders: Vec<HolderId>,
 }
 
@@ -29,7 +30,7 @@ impl Draft {
     #[must_use]
     pub fn seal(
         self,
-        company_signature: SignatureBytes,
+        company_signature: Option<SignatureBytes>,
         holder_signatures: Vec<HolderSignature>,
     ) -> Entry {
         Entry {
@@ -47,7 +48,7 @@ pub struct Entry {
     pub sequence: u64,
     pub previous: Digest,
     pub event: Event,
-    pub company_signature: SignatureBytes,
+    pub company_signature: Option<SignatureBytes>,
     pub holder_signatures: Vec<HolderSignature>,
 }
 

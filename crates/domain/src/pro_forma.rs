@@ -1,19 +1,21 @@
 //! Who owns what today, as if every capped SAFE had already converted.
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::cap_table::{CapTable, Position};
 use crate::error::CapTableError;
 use crate::ids::{HolderId, InstrumentId};
 use crate::math::Ratio;
 use crate::quantity::Shares;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct OwnershipLine {
     pub instrument: InstrumentId,
     pub holder: HolderId,
     pub ownership: Ownership,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Ownership {
     Determined {
         shares: Shares,
@@ -23,7 +25,7 @@ pub enum Ownership {
     PendingRound,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ProForma {
     pub capitalization: Shares,
     pub option_pool: Shares,

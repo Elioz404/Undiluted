@@ -60,6 +60,13 @@ pub enum Event {
 }
 
 impl Event {
+    /// An MFN election exercises a right the company granted when it issued the
+    /// SAFE, so the company cannot withhold it. The rules still validate it.
+    #[must_use]
+    pub const fn requires_company_signature(&self) -> bool {
+        !matches!(self, Self::MfnElected { .. })
+    }
+
     /// Holders whose rights this event creates or changes, who must therefore
     /// co-sign it. Registration is handled apart because it proves a new key.
     pub(crate) fn affected_holders(
