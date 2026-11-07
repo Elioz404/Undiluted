@@ -24,6 +24,11 @@ export interface Config {
   maxPaymentMicros: bigint;
   /** The largest exit the relay will fund from its own test balance. */
   maxExitMicros: bigint;
+  /** What the relay spends on everyone's behalf in one day, at most. */
+  dailyBudgetMicros: bigint;
+  /** Calls one address may make per minute, and spending calls per hour. */
+  callsPerMinute: number;
+  spendingCallsPerHour: number;
 }
 
 type Environment = Record<string, string | undefined>;
@@ -46,6 +51,14 @@ function amount(env: Environment, name: string, fallback: string): bigint {
     throw new Error(`${name} must be a whole number of micro units`);
   }
   return BigInt(value);
+}
+
+function count(env: Environment, name: string, fallback: string): number {
+  const value = Number(optional(env, name, fallback));
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a whole number above zero`);
+  }
+  return value;
 }
 
 function signerFrom(env: Environment): Config["signer"] {
@@ -78,6 +91,9 @@ export function loadConfig(env: Environment): Config {
     destinationAsset: required(env, "DESTINATION_ASSET"),
     maxPaymentMicros: amount(env, "MAX_PAYMENT_MICROS", "5000000"),
     maxExitMicros: amount(env, "MAX_EXIT_MICROS", "10000000"),
+    dailyBudgetMicros: amount(env, "DAILY_BUDGET_MICROS", "60000000"),
+    callsPerMinute: count(env, "CALLS_PER_MINUTE", "30"),
+    spendingCallsPerHour: count(env, "SPENDING_CALLS_PER_HOUR", "10"),
   };
 }
 

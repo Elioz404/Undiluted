@@ -1,13 +1,9 @@
 /** Conversions between the encodings the enclave and the contracts use. */
 
-import { baseDecode, baseEncode } from "near-api-js";
+import { baseEncode } from "near-api-js";
 
 export function hexToBase58(hex: string): string {
   return baseEncode(Buffer.from(hex, "hex"));
-}
-
-export function base58ToHex(value: string): string {
-  return Buffer.from(baseDecode(value)).toString("hex");
 }
 
 export function hexToBase64(hex: string): string {

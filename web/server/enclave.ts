@@ -4,6 +4,7 @@
  * because the browser checks the enclave's signature on every one.
  */
 
+import { isHex } from "./encoding.ts";
 import type { Near } from "./near.ts";
 
 const REQUEST_GAS = 300_000_000_000_000n;
@@ -21,17 +22,32 @@ export interface EnclaveSettings {
 }
 
 export class Enclave {
-  private identity: unknown = null;
+  private identity: Promise<unknown> | null = null;
 
   constructor(
     private readonly near: Near,
     private readonly settings: EnclaveSettings,
   ) {}
 
-  /** The enclave's public keys never change, so they are asked for once. */
-  async getIdentity(): Promise<unknown> {
-    this.identity ??= await this.run({ operation: "identity" });
+  /**
+   * The enclave's public keys never change, so they are asked for once. Callers
+   * arriving together share the one run; a failed run is forgotten.
+   */
+  getIdentity(): Promise<unknown> {
+    this.identity ??= this.run({ operation: "identity" }).catch((error: unknown) => {
+      this.identity = null;
+      throw error;
+    });
     return this.identity;
+  }
+
+  /** The key the enclave signs with, as hex. */
+  async signingKey(): Promise<string> {
+    const identity = (await this.getIdentity()) as { signing_key?: unknown };
+    if (!isHex(identity.signing_key, 32)) {
+      throw new Error("the enclave did not return its signing key");
+    }
+    return identity.signing_key;
   }
 
   /** Forwards one encrypted request and returns the enclave's output as it is. */

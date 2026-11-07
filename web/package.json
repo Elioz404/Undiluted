@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "start": "tsx server/main.ts",
-    "test": "tsx --test server/*.test.ts"
+    "test": "tsx --test server/*.test.ts src/lib/*.test.ts"
   },
   "dependencies": {
     "express": "^5.3.0",

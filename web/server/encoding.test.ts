@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { base58ToHex, ed25519Key, hexToBase58, hexToBase64, isHex } from "./encoding.ts";
+import { ed25519Key, hexToBase58, hexToBase64, isHex } from "./encoding.ts";
 
 const HEAD = "3b7fcb8c5435dd4f9cde9dbec535dcc2211325f42808d4d95d0530d8d3ca1612";
 
-test("a head converts to the base58 the contract stores, and back", () => {
+test("a head converts to the base58 the contract stores", () => {
   // Read from the anchor contract on testnet for this exact head.
   assert.equal(hexToBase58(HEAD), "51G5TPkpayAKTvJiYN75z6QaE48m8fA4AaXMLFUK7p7j");
-  assert.equal(base58ToHex(hexToBase58(HEAD)), HEAD);
 });
 
 test("an enclave key becomes a NEAR public key", () => {

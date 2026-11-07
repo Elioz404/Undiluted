@@ -4,8 +4,8 @@
  * accept only what the enclave signed and the enclave checks payments itself.
  */
 
-import { ed25519Key, hexToBase58, hexToBase64, base58ToHex } from "./encoding.ts";
-import type { Near } from "./near.ts";
+import { ed25519Key, hexToBase58, hexToBase64 } from "./encoding.ts";
+import { Refused, type Near } from "./near.ts";
 
 const CALL_GAS = 30_000_000_000_000n;
 const PAY_GAS = 60_000_000_000_000n;
@@ -61,14 +61,6 @@ export class Anchors {
     });
   }
 
-  /** The published head for `sequence`, as hex, or null. */
-  async headAt(company: string, sequence: number): Promise<string | null> {
-    const head = await this.near.view<string | null>(this.contract, "head_at", {
-      company_id: company,
-      sequence,
-    });
-    return head ? base58ToHex(head) : null;
-  }
 }
 
 export class Tokens {
@@ -136,20 +128,24 @@ export class Payouts {
     await this.tokens.transferCall(this.token, this.contract, micros, company);
   }
 
+  /**
+   * Relays one payment from the relay's own distribution. The contract checks
+   * the enclave's signature for free first, so a forged instruction costs the
+   * relay nothing, not even registering its recipient with the token.
+   */
   async pay(company: string, instruction: PayoutInstruction): Promise<void> {
+    const args = {
+      funder: this.near.accountId,
+      company_id: company,
+      index: instruction.index,
+      recipient: instruction.recipient,
+      amount: instruction.amount_micros,
+      signature: instruction.signature,
+    };
+    if (!(await this.near.view<boolean>(this.contract, "verifies", args))) {
+      throw new Refused("the enclave did not sign this payment");
+    }
     await this.tokens.register(this.token, instruction.recipient);
-    await this.near.call({
-      contract: this.contract,
-      method: "pay",
-      args: {
-        company_id: company,
-        index: instruction.index,
-        recipient: instruction.recipient,
-        amount: instruction.amount_micros,
-        signature: instruction.signature,
-      },
-      gas: PAY_GAS,
-      deposit: STORAGE_DEPOSIT,
-    });
+    await this.near.call({ contract: this.contract, method: "pay", args, gas: PAY_GAS, deposit: STORAGE_DEPOSIT });
   }
 }
