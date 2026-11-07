@@ -60,15 +60,27 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         self.signer.public_key()
     }
 
+    /// Vouches for the key requests are encrypted to.
+    pub(crate) fn sign_encryption_key(
+        &self,
+        encryption_key: &[u8; 32],
+    ) -> Result<SignatureBytes, crate::ports::StoreError> {
+        self.signer
+            .sign(crate::protocol::identity_digest(encryption_key).as_bytes())
+    }
+
     /// Answers a request. A refused request is still a signed reply, so a client
     /// can tell "you may not" from a failure on the way to the enclave.
+    ///
+    /// Each request is answered once. Its envelope is public, so anyone can send
+    /// it again; a replay gets the very same reply back. That keeps a mutation
+    /// from applying twice, a refusal from turning into a success later, and a
+    /// reply key from ever encrypting two different answers.
     pub fn handle(&mut self, request: &SignedRequest) -> Result<Reply, ServiceError> {
         let digest = request.digest()?;
         let receipt_key = receipt_key(&digest);
 
-        if request.command.is_mutation()
-            && let Some(stored) = self.store.get(&receipt_key)?
-        {
+        if let Some(stored) = self.store.get(&receipt_key)? {
             return from_slice(&stored).map_err(|_| ServiceError::CorruptData);
         }
 
@@ -88,9 +100,9 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
             .transpose()?;
         let reply = self.sign_reply(digest, response, anchor)?;
 
-        if request.command.is_mutation() && !matches!(reply.response, Response::Rejected { .. }) {
-            let encoded = to_vec(&reply).map_err(|_| ServiceError::Encoding)?;
-            self.store.put(&receipt_key, &encoded)?;
+        let encoded = to_vec(&reply).map_err(|_| ServiceError::Encoding)?;
+        if !self.store.put_new(&receipt_key, &encoded)? {
+            return Err(ServiceError::Conflict);
         }
         Ok(reply)
     }

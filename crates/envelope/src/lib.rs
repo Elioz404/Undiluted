@@ -1,13 +1,17 @@
 //! End-to-end encryption between a client and the enclave.
 //!
 //! Whatever carries a request (a relay, a public transaction) sees only
-//! ciphertext. Each request uses a fresh ephemeral X25519 key, so every derived
-//! key encrypts exactly one message and a fixed nonce is safe. The reply is
-//! encrypted under a separate key derived from the same exchange, which only the
-//! client that sent the request can derive.
+//! ciphertext. The reply is encrypted under a separate key derived from the same
+//! exchange, which only the client that sent the request can derive.
 //!
-//! Messages are padded to fixed-size blocks because a ciphertext's length would
-//! otherwise reveal what kind of operation it carries.
+//! Both keys use a fixed nonce, which is safe only because each encrypts a
+//! single plaintext: every request has a fresh ephemeral X25519 key, and the
+//! service answers each request once, returning the stored reply to a replay.
+//! A caller that could encrypt two different replies under one reply key would
+//! break confidentiality.
+//!
+//! Messages are padded to 1 KiB blocks, so a ciphertext's length does not tell
+//! which operation it carries. It still shows the size bracket of the content.
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};

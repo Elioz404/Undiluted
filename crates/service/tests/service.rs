@@ -471,20 +471,36 @@ fn retrying_a_request_returns_the_first_answer_without_acting_twice() {
 }
 
 #[test]
-fn a_rejection_is_not_remembered_so_a_retry_can_succeed() {
+fn a_replayed_rejection_stays_rejected() {
     let mut harness = seeded();
     harness.propose(safe("first", "ben", 1, Some(10), false));
     let event = safe("second", "ben", 1, Some(10), false);
     let request = harness.request(COMPANY_SEED, Actor::Company, Command::Propose { event });
-
+    let first = harness.service.handle(&request).unwrap();
     assert_eq!(
-        rejected(&harness.service.handle(&request).unwrap()),
+        rejected(&first),
         "another proposal is waiting for signatures"
     );
 
     harness.send(COMPANY_SEED, Actor::Company, Command::CancelProposal);
-    let retry = harness.service.handle(&request).unwrap();
-    assert!(matches!(retry.response, Response::Proposal(_)));
+    assert_eq!(harness.service.handle(&request).unwrap(), first);
+}
+
+#[test]
+fn a_replayed_read_gets_the_first_answer_even_after_the_table_changed() {
+    let mut harness = seeded();
+    let request = harness.request(
+        BEN_SEED,
+        Actor::Holder(holder("ben")),
+        Command::GetStatement,
+    );
+    let first = harness.service.handle(&request).unwrap();
+
+    harness.commit(
+        safe("more", "ben", 2, Some(10), false),
+        &[("ben", BEN_SEED)],
+    );
+    assert_eq!(harness.service.handle(&request).unwrap(), first);
 }
 
 #[test]

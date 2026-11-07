@@ -10,6 +10,14 @@ const REQUEST_TAG: &str = "undiluted/service/request/v1";
 const REPLY_TAG: &str = "undiluted/service/reply/v1";
 const ANCHOR_TAG: &str = "undiluted/service/anchor/v1";
 const PAYOUT_TAG: &str = "undiluted/service/payout/v1";
+const IDENTITY_TAG: &str = "undiluted/service/identity/v1";
+
+/// What the enclave signs to vouch for its encryption key. Without it, whoever
+/// relays the identity could hand out their own key and read every request.
+#[must_use]
+pub fn identity_digest(encryption_key: &[u8; 32]) -> Digest {
+    Digest::tagged(IDENTITY_TAG, encryption_key)
+}
 const SUBSCRIPTION_MEMO_PREFIX: &str = "undiluted";
 
 /// The memo a payment for a subscription must carry. A payment's hash is public
@@ -51,21 +59,6 @@ pub enum Command {
     /// The open round's terms. Anyone may read them, so an investor can decide
     /// before paying; what was raised stays private.
     GetRound,
-}
-
-impl Command {
-    /// Whether running it twice would change state twice. Only these commands
-    /// have their replies stored so a retry gets the first answer back.
-    #[must_use]
-    pub const fn is_mutation(&self) -> bool {
-        matches!(
-            self,
-            Self::CreateCompany { .. }
-                | Self::Propose { .. }
-                | Self::Sign { .. }
-                | Self::CancelProposal
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
