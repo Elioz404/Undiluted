@@ -1,0 +1,473 @@
+//! End-to-end behaviour of the service through signed requests.
+
+use ed25519_dalek::{Signer, SigningKey};
+use undiluted_domain::{
+    CompanyId, HolderId, InstrumentId, Money, Ownership, Ratio, Safe, SafeTerms, Shares,
+};
+use undiluted_ledger::{Digest, Event, PublicKey, SettlementReference, SignatureBytes};
+use undiluted_service::{
+    Actor, Command, EnclaveSigner, MemoryStore, Reply, Response, Service, SignedRequest, StoreError,
+};
+
+const COMPANY_SEED: u8 = 1;
+const ANA_SEED: u8 = 2;
+const BEN_SEED: u8 = 3;
+const MALLORY_SEED: u8 = 9;
+
+#[derive(Debug)]
+struct TestSigner(SigningKey);
+
+impl EnclaveSigner for TestSigner {
+    fn public_key(&self) -> Result<PublicKey, StoreError> {
+        Ok(PublicKey::from_bytes(self.0.verifying_key().to_bytes()))
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<SignatureBytes, StoreError> {
+        Ok(SignatureBytes::from_bytes(self.0.sign(message).to_bytes()))
+    }
+}
+
+fn key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
+
+fn public(seed: u8) -> PublicKey {
+    PublicKey::from_bytes(key(seed).verifying_key().to_bytes())
+}
+
+fn sign_digest(seed: u8, digest: &Digest) -> SignatureBytes {
+    SignatureBytes::from_bytes(key(seed).sign(digest.as_bytes()).to_bytes())
+}
+
+fn holder(name: &str) -> HolderId {
+    HolderId::new(name).unwrap()
+}
+
+fn instrument(name: &str) -> InstrumentId {
+    InstrumentId::new(name).unwrap()
+}
+
+fn usd(dollars: u128) -> Money {
+    Money::new(dollars * 1_000_000)
+}
+
+struct Harness {
+    service: Service<MemoryStore, TestSigner>,
+    company: CompanyId,
+    next_id: u8,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let mut harness = Self {
+            service: Service::new(MemoryStore::default(), TestSigner(key(42))),
+            company: CompanyId::new("acme").unwrap(),
+            next_id: 0,
+        };
+        let reply = harness.send(
+            COMPANY_SEED,
+            Actor::Company,
+            Command::CreateCompany {
+                key: public(COMPANY_SEED),
+            },
+        );
+        assert!(matches!(reply.response, Response::CompanyCreated { .. }));
+        harness
+    }
+
+    fn request(&mut self, seed: u8, actor: Actor, command: Command) -> SignedRequest {
+        self.next_id += 1;
+        let id = [self.next_id; 16];
+        let digest = SignedRequest::signing_digest(&id, &self.company, &actor, &command).unwrap();
+        SignedRequest {
+            id,
+            company: self.company.clone(),
+            actor,
+            command,
+            signature: sign_digest(seed, &digest),
+        }
+    }
+
+    fn send(&mut self, seed: u8, actor: Actor, command: Command) -> Reply {
+        let request = self.request(seed, actor, command);
+        self.service.handle(&request).unwrap()
+    }
+
+    /// Runs an event through proposal and every signature it needs.
+    fn commit(&mut self, event: Event, holders: &[(&str, u8)]) -> Reply {
+        let digest = self.propose(event);
+        self.send(
+            COMPANY_SEED,
+            Actor::Company,
+            Command::Sign {
+                digest,
+                signature: sign_digest(COMPANY_SEED, &digest),
+            },
+        );
+        let mut last = None;
+        for (name, seed) in holders {
+            last = Some(self.send(
+                *seed,
+                Actor::Holder(holder(name)),
+                Command::Sign {
+                    digest,
+                    signature: sign_digest(*seed, &digest),
+                },
+            ));
+        }
+        let reply = last.expect("events in these tests have a holder");
+        assert!(
+            matches!(reply.response, Response::Committed { .. }),
+            "{reply:?}"
+        );
+        reply
+    }
+
+    fn propose(&mut self, event: Event) -> Digest {
+        let reply = self.send(COMPANY_SEED, Actor::Company, Command::Propose { event });
+        match reply.response {
+            Response::Proposal(view) => view.digest,
+            other => panic!("expected a proposal, got {other:?}"),
+        }
+    }
+
+    fn register(&mut self, name: &str, seed: u8) {
+        self.commit(
+            Event::HolderRegistered {
+                holder: holder(name),
+                key: public(seed),
+            },
+            &[(name, seed)],
+        );
+    }
+
+    fn statement(&mut self, name: &str, seed: u8) -> undiluted_service::Statement {
+        match self
+            .send(seed, Actor::Holder(holder(name)), Command::GetStatement)
+            .response
+        {
+            Response::Statement(statement) => statement,
+            other => panic!("expected a statement, got {other:?}"),
+        }
+    }
+}
+
+fn safe(id: &str, owner: &str, purchase: u128, cap: Option<u128>, mfn: bool) -> Event {
+    Event::SafeIssued {
+        instrument: instrument(id),
+        holder: holder(owner),
+        safe: Safe::new(
+            usd(purchase),
+            SafeTerms::new(cap.map(usd), None, mfn).unwrap(),
+        )
+        .unwrap(),
+        settlement: SettlementReference::new("tx").unwrap(),
+    }
+}
+
+fn rejected(reply: &Reply) -> &str {
+    match &reply.response {
+        Response::Rejected { reason } => reason,
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+}
+
+/// Ana holds the founders' shares and an MFN SAFE, Ben a capped SAFE.
+fn seeded() -> Harness {
+    let mut harness = Harness::new();
+    harness.register("ana", ANA_SEED);
+    harness.register("ben", BEN_SEED);
+    harness.commit(
+        Event::CommonIssued {
+            instrument: instrument("founders"),
+            holder: holder("ana"),
+            shares: Shares::new(8_000_000),
+        },
+        &[("ana", ANA_SEED)],
+    );
+    harness.commit(safe("mfn", "ana", 100, None, true), &[("ana", ANA_SEED)]);
+    harness.commit(
+        safe("ben-safe", "ben", 500_000, Some(5_000_000), false),
+        &[("ben", BEN_SEED)],
+    );
+    harness
+}
+
+#[test]
+fn a_statement_shows_only_the_holders_own_lines() {
+    let mut harness = seeded();
+
+    let statement = harness.statement("ben", BEN_SEED);
+
+    assert_eq!(statement.lines.len(), 1);
+    assert_eq!(statement.lines[0].instrument, instrument("ben-safe"));
+    assert_eq!(
+        statement.lines[0].ownership,
+        Ownership::Determined {
+            shares: Shares::new(888_888),
+            ratio: Ratio::from_fraction(1, 10).unwrap(),
+        }
+    );
+    assert!(statement.reconciles);
+}
+
+#[test]
+fn a_better_later_safe_reaches_the_mfn_holder_who_elects_alone() {
+    let mut harness = seeded();
+
+    let offers = harness.statement("ana", ANA_SEED).mfn_offers;
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].source, instrument("ben-safe"));
+
+    let event = Event::MfnElected {
+        target: instrument("mfn"),
+        source: instrument("ben-safe"),
+    };
+    let actor = Actor::Holder(holder("ana"));
+    let digest = match harness
+        .send(ANA_SEED, actor.clone(), Command::Propose { event })
+        .response
+    {
+        Response::Proposal(view) => {
+            assert!(!view.company_signature_missing);
+            view.digest
+        }
+        other => panic!("expected a proposal, got {other:?}"),
+    };
+    let reply = harness.send(
+        ANA_SEED,
+        actor,
+        Command::Sign {
+            digest,
+            signature: sign_digest(ANA_SEED, &digest),
+        },
+    );
+
+    assert!(matches!(reply.response, Response::Committed { .. }));
+    assert_eq!(harness.statement("ana", ANA_SEED).mfn_offers.len(), 0);
+}
+
+#[test]
+fn only_the_company_sees_the_whole_table() {
+    let mut harness = seeded();
+
+    let reply = harness.send(COMPANY_SEED, Actor::Company, Command::GetCapTable);
+    assert!(matches!(reply.response, Response::CapTable(_)));
+
+    let reply = harness.send(BEN_SEED, Actor::Holder(holder("ben")), Command::GetCapTable);
+    assert_eq!(rejected(&reply), "this actor may not do that");
+}
+
+#[test]
+fn a_holder_cannot_propose_issuing_shares_or_read_others_proposals() {
+    let mut harness = seeded();
+    let ben = Actor::Holder(holder("ben"));
+
+    let event = Event::CommonIssued {
+        instrument: instrument("free"),
+        holder: holder("ben"),
+        shares: Shares::new(1),
+    };
+    let reply = harness.send(BEN_SEED, ben.clone(), Command::Propose { event });
+    assert_eq!(rejected(&reply), "this actor may not do that");
+
+    harness.propose(safe("for-ana", "ana", 1, Some(10), false));
+    let reply = harness.send(BEN_SEED, ben, Command::GetProposal);
+    assert_eq!(rejected(&reply), "this actor may not do that");
+}
+
+#[test]
+fn nobody_can_act_as_someone_else() {
+    let mut harness = seeded();
+
+    let reply = harness.send(MALLORY_SEED, Actor::Company, Command::GetCapTable);
+    assert_eq!(rejected(&reply), "request signature is invalid");
+
+    let reply = harness.send(
+        MALLORY_SEED,
+        Actor::Holder(holder("ben")),
+        Command::GetStatement,
+    );
+    assert_eq!(rejected(&reply), "request signature is invalid");
+}
+
+#[test]
+fn an_invited_holder_can_read_the_proposal_before_registering() {
+    let mut harness = seeded();
+    harness.propose(Event::HolderRegistered {
+        holder: holder("eve"),
+        key: public(MALLORY_SEED),
+    });
+
+    let reply = harness.send(
+        MALLORY_SEED,
+        Actor::Holder(holder("eve")),
+        Command::GetProposal,
+    );
+
+    assert!(matches!(reply.response, Response::Proposal(_)));
+}
+
+#[test]
+fn an_instrument_waits_for_its_holder() {
+    let mut harness = seeded();
+    let digest = harness.propose(safe("new", "ben", 1, Some(10), false));
+
+    let reply = harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::Sign {
+            digest,
+            signature: sign_digest(COMPANY_SEED, &digest),
+        },
+    );
+
+    match reply.response {
+        Response::Proposal(view) => {
+            assert_eq!(view.holder_signatures_missing, vec![holder("ben")]);
+        }
+        other => panic!("expected a pending proposal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_signature_for_another_digest_is_refused() {
+    let mut harness = seeded();
+    harness.propose(safe("new", "ben", 1, Some(10), false));
+    let other = Digest::tagged("other", b"proposal");
+
+    let reply = harness.send(
+        BEN_SEED,
+        Actor::Holder(holder("ben")),
+        Command::Sign {
+            digest: other,
+            signature: sign_digest(BEN_SEED, &other),
+        },
+    );
+
+    assert_eq!(
+        rejected(&reply),
+        "this signature is not for the pending proposal"
+    );
+}
+
+#[test]
+fn only_one_proposal_can_be_open_until_it_is_cancelled() {
+    let mut harness = seeded();
+    harness.propose(safe("first", "ben", 1, Some(10), false));
+
+    let event = safe("second", "ben", 1, Some(10), false);
+    let reply = harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::Propose {
+            event: event.clone(),
+        },
+    );
+    assert_eq!(
+        rejected(&reply),
+        "another proposal is waiting for signatures"
+    );
+
+    let reply = harness.send(COMPANY_SEED, Actor::Company, Command::CancelProposal);
+    assert!(matches!(reply.response, Response::Cancelled));
+    harness.propose(event);
+}
+
+#[test]
+fn retrying_a_request_returns_the_first_answer_without_acting_twice() {
+    let mut harness = seeded();
+    let digest = harness.propose(safe("new", "ben", 1, Some(10), false));
+    harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::Sign {
+            digest,
+            signature: sign_digest(COMPANY_SEED, &digest),
+        },
+    );
+    let request = harness.request(
+        BEN_SEED,
+        Actor::Holder(holder("ben")),
+        Command::Sign {
+            digest,
+            signature: sign_digest(BEN_SEED, &digest),
+        },
+    );
+
+    let first = harness.service.handle(&request).unwrap();
+    let retry = harness.service.handle(&request).unwrap();
+
+    assert!(matches!(first.response, Response::Committed { .. }));
+    assert_eq!(first, retry);
+    assert_eq!(harness.statement("ben", BEN_SEED).entries, 6);
+}
+
+#[test]
+fn a_rejection_is_not_remembered_so_a_retry_can_succeed() {
+    let mut harness = seeded();
+    harness.propose(safe("first", "ben", 1, Some(10), false));
+    let event = safe("second", "ben", 1, Some(10), false);
+    let request = harness.request(COMPANY_SEED, Actor::Company, Command::Propose { event });
+
+    assert_eq!(
+        rejected(&harness.service.handle(&request).unwrap()),
+        "another proposal is waiting for signatures"
+    );
+
+    harness.send(COMPANY_SEED, Actor::Company, Command::CancelProposal);
+    let retry = harness.service.handle(&request).unwrap();
+    assert!(matches!(retry.response, Response::Proposal(_)));
+}
+
+#[test]
+fn replies_are_signed_by_the_enclave_and_bound_to_the_request() {
+    let mut harness = seeded();
+    let enclave = PublicKey::from_bytes(key(42).verifying_key().to_bytes());
+    let request = harness.request(COMPANY_SEED, Actor::Company, Command::GetCapTable);
+
+    let reply = harness.service.handle(&request).unwrap();
+
+    assert!(reply.is_authentic(&enclave));
+    assert!(!reply.is_authentic(&public(MALLORY_SEED)));
+    assert_eq!(reply.request, request.digest().unwrap());
+
+    let mut forged = reply;
+    forged.response = Response::Cancelled;
+    assert!(!forged.is_authentic(&enclave));
+}
+
+#[test]
+fn committing_an_event_produces_an_attested_head() {
+    let mut harness = seeded();
+
+    let reply = harness.commit(safe("new", "ben", 1, Some(10), false), &[("ben", BEN_SEED)]);
+
+    let anchor = reply.anchor.expect("a commit has an anchor");
+    let Response::Committed { sequence, head } = reply.response else {
+        panic!("expected a commit");
+    };
+    assert_eq!(anchor.sequence, sequence);
+    assert_eq!(anchor.head, head);
+}
+
+#[test]
+fn a_company_cannot_be_created_twice() {
+    let mut harness = Harness::new();
+    let reply = harness.send(
+        MALLORY_SEED,
+        Actor::Company,
+        Command::CreateCompany {
+            key: public(MALLORY_SEED),
+        },
+    );
+    assert_eq!(rejected(&reply), "this company already exists");
+}
+
+#[test]
+fn an_unknown_company_is_refused() {
+    let mut harness = Harness::new();
+    harness.company = CompanyId::new("ghost").unwrap();
+    let reply = harness.send(COMPANY_SEED, Actor::Company, Command::GetCapTable);
+    assert_eq!(rejected(&reply), "this company does not exist");
+}
