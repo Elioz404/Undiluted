@@ -14,9 +14,15 @@ commitment to its history.
 - **Every change is a signed event.** The current table is never stored on its
   own; it is the result of replaying the events.
 - **Holders co-sign what affects them.** An instrument cannot be issued or changed
-  without the signature of the holder and the company.
+  without the signature of the holder and the company. An MFN election needs only
+  the holder: the right was granted when the SAFE was issued.
 - **History is chained.** Each entry commits to the previous one, so one digest,
   the head, commits to everything before it without revealing any of it.
+- **The table lives in a TEE.** The service runs in an Intel TDX enclave on
+  [OutLayer](https://outlayer.ai), with storage only that code can decrypt.
+- **Messages are encrypted end to end.** Inputs and outputs of on-chain runs are
+  public, so each request and reply is encrypted between the client and the
+  enclave, and padded so its size says nothing about what it carries.
 - **Heads are anchored on NEAR.** The anchor contract only accepts sequences in
   order and never replaces a recorded head, so a company cannot show two different
   histories to two different investors.
@@ -30,13 +36,33 @@ result on any machine.
 | --- | --- | --- |
 | `crates/domain` | Instruments, SAFE conversion, MFN, exit distribution | nothing that does I/O |
 | `crates/ledger` | Signed hash-chained events that rebuild a cap table | `domain` |
+| `crates/envelope` | End-to-end encryption between client and enclave | nothing that does I/O |
+| `crates/service` | Authorization, proposals, statements; storage and signing are ports | `ledger`, `envelope` |
+| `crates/client` | Signs, encrypts and sends requests, verifies replies | `service` |
+| `crates/cli` | The runnable demo | `client` |
+| `crates/enclave` | Connects OutLayer's sealed storage and TEE keys to the service | `service` |
 | `contracts/anchor` | Append-only registry of heads on NEAR | `near-sdk` |
+
+`crates/enclave` targets `wasm32-wasip2` only, so it is outside the Cargo workspace.
 
 ## Try it
 
 Requires [Rust](https://rustup.rs). The toolchain is pinned in
 `rust-toolchain.toml` and installs itself. Windows users without the MSVC build
-tools can use the Docker command below instead.
+tools can use the Docker form instead.
+
+Run a fictional raise, with no account, key or network. This runs the real enclave
+code in-process, so it shows the rules, not the confidentiality:
+
+```bash
+cargo run -p undiluted-cli -- demo local
+```
+
+You will see an MFN holder get offered better terms without learning who received
+them, exercise the clause alone, another investor be refused the full table, and an
+impostor be refused.
+
+Run the tests:
 
 ```bash
 cargo test --workspace
@@ -54,7 +80,30 @@ Do this, and see this:
 | `cargo test -p undiluted-domain waterfall` | Who takes their money back and who converts at small, medium and large exits, always adding up to the exact proceeds |
 | `cargo test -p undiluted-domain mfn` | A later SAFE with better terms lets an earlier MFN holder adopt them |
 | `cargo test -p undiluted-ledger` | Altered, removed or forged entries are rejected, and a rewritten history no longer matches the head a holder kept |
+| `cargo test -p undiluted-envelope` | Only the enclave opens a request, only the sender opens the reply, and tampering is detected |
+| `cargo test -p undiluted-service` | Who may do what, and that a retried request does not act twice |
+| `cargo test -p undiluted-client` | Answers lost on the way back do not apply anything twice |
 | `cargo test -p undiluted-anchor` | A recorded head cannot be overwritten, skipped or written by anyone but the authority |
+
+## Deploying the enclave
+
+```bash
+cd crates/enclave && cargo build --target wasm32-wasip2 --release
+```
+
+Upload the wasm with the [OutLayer CLI](https://github.com/out-layer/outlayer-cli),
+deploy it as a project, and generate the enclave key inside the TEE so nobody ever
+sees it:
+
+```bash
+outlayer secrets set --generate PROTECTED_ENCLAVE_KEY:hex32 --project OWNER/PROJECT
+```
+
+Then run the same demo against it, on testnet:
+
+```bash
+cargo run -p undiluted-cli -- demo outlayer --project OWNER/PROJECT --secrets-account OWNER
+```
 
 ## Rules and their limits
 
@@ -64,6 +113,11 @@ Do this, and see this:
 - Exits are non-participating and pari passu between preferred stock and SAFEs. A
   SAFE with no valuation cap can only take its money back. Unissued options and
   token warrants receive nothing.
+- One deployment serves its calls through one relay account, because the enclave's
+  storage is bound to the account that signs the call.
+- Anchors reveal a company identifier and how many events it has recorded.
+- Confidentiality depends on the TEE and on OutLayer's platform; see
+  [what its operator can and cannot do](https://github.com/out-layer/outlayer/blob/main/docs/NON_CUSTODIAL.md).
 - The ledger protects what is recorded in it. It cannot stop a founder from signing
   something outside of it.
 - Instruments are recorded, not offered. This is not legal advice, and a real raise
@@ -76,7 +130,12 @@ Built on [near-sdk](https://github.com/near/near-sdk-rs),
 [ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek),
 [sha2](https://github.com/RustCrypto/hashes),
 [primitive-types](https://github.com/paritytech/parity-common),
-[thiserror](https://github.com/dtolnay/thiserror) and, for tests,
+[thiserror](https://github.com/dtolnay/thiserror),
+[x25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek),
+[chacha20poly1305](https://github.com/RustCrypto/AEADs),
+[hkdf](https://github.com/RustCrypto/KDFs),
+[outlayer](https://github.com/out-layer/outlayer),
+[clap](https://github.com/clap-rs/clap) and, for tests,
 [proptest](https://github.com/proptest-rs/proptest).
 
 ## License

@@ -15,4 +15,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo check -p undiluted-anchor --target wasm32-unknown-unknown
-      - run: cargo check -p undiluted-domain -p undiluted-ledger --target wasm32-wasip2
+      - run: cargo run -p undiluted-cli -- demo local
+      - run: cargo build --target wasm32-wasip2 --release
+        working-directory: crates/enclave
