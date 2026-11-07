@@ -1,6 +1,8 @@
 //! Carries out an approved exit: holds the funds and makes the signed payments.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::thread;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -116,6 +118,33 @@ impl PayoutExecutor for LocalPayouts {
     }
 }
 
+/// How long to wait on a network that can report a timeout for a transaction
+/// that later lands.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// How many times to send something that is safe to send again.
+    pub attempts: u32,
+    /// How many times to look for the result of each attempt.
+    pub checks: u32,
+    pub check_interval: Duration,
+}
+
+impl RetryPolicy {
+    /// Whether `check` becomes true in time. A check that fails counts as not
+    /// yet, because reads can time out as well.
+    fn eventually(&self, mut check: impl FnMut() -> Result<bool, ClientError>) -> bool {
+        for attempt in 0..self.checks {
+            if attempt > 0 {
+                thread::sleep(self.check_interval);
+            }
+            if matches!(check(), Ok(true)) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NearPayoutsConfig {
     /// Signs, funds and relays.
@@ -131,6 +160,7 @@ pub struct NearPayoutsConfig {
     pub storage_deposit: String,
     /// Registers an account with the token contract.
     pub token_storage_deposit: String,
+    pub retry: RetryPolicy,
 }
 
 #[derive(Debug)]
@@ -179,6 +209,25 @@ impl NearPayouts {
         )?;
         Ok(paid.as_bool().unwrap_or(false))
     }
+
+    fn exists(&self, company: &CompanyId) -> Result<bool, ClientError> {
+        let distribution = view(
+            &self.0.rpc_url,
+            &self.0.contract,
+            "distribution",
+            &json!({ "company_id": company.as_str() }),
+        )?;
+        Ok(!distribution.is_null())
+    }
+
+    /// A payment is marked as paid before its transfer finishes and reopened if
+    /// the transfer fails, so it only counts once it stays paid.
+    fn stays_paid(&self, company: &CompanyId, index: u32) -> bool {
+        self.0.retry.eventually(|| self.is_paid(company, index)) && {
+            thread::sleep(self.0.retry.check_interval);
+            self.0.retry.eventually(|| self.is_paid(company, index))
+        }
+    }
 }
 
 impl PayoutExecutor for NearPayouts {
@@ -188,28 +237,37 @@ impl PayoutExecutor for NearPayouts {
         enclave_key: &PublicKey,
         total: Money,
     ) -> Result<(), ClientError> {
-        self.register_with_token(&self.0.contract)?;
         let arguments = json!({
             "company_id": company.as_str(),
             "token": self.0.token,
             "enclave_key": format!("ed25519:{}", bs58::encode(enclave_key.as_bytes()).into_string()),
             "total": total.value().to_string(),
         });
-        self.0
-            .near
-            .call(&ContractCall {
-                contract: &self.0.contract,
-                method: "open",
-                arguments: &arguments,
-                gas: &self.0.call_gas,
-                deposit: &self.0.storage_deposit,
-            })
-            .map(|_| ())
-            .map_err(ClientError::Payout)
+        let mut failure = None;
+        for _ in 0..self.0.retry.attempts {
+            let sent = self.register_with_token(&self.0.contract).and_then(|()| {
+                self.0
+                    .near
+                    .call(&ContractCall {
+                        contract: &self.0.contract,
+                        method: "open",
+                        arguments: &arguments,
+                        gas: &self.0.call_gas,
+                        deposit: &self.0.storage_deposit,
+                    })
+                    .map_err(ClientError::Payout)
+            });
+            if self.0.retry.eventually(|| self.exists(company)) {
+                return Ok(());
+            }
+            failure = sent.err();
+        }
+        Err(failure
+            .unwrap_or_else(|| ClientError::Payout("the distribution was not opened".to_owned())))
     }
 
-    /// Never retried blindly: a failure may still have moved the funds, so the
-    /// contract is asked what actually arrived.
+    /// Sent only once: a failure may still have moved the funds, so the contract
+    /// is asked what actually arrived.
     fn fund(&mut self, company: &CompanyId, amount: Money) -> Result<(), ClientError> {
         let arguments = json!({
             "receiver_id": self.0.contract,
@@ -223,7 +281,11 @@ impl PayoutExecutor for NearPayouts {
             gas: &self.0.fund_gas,
             deposit: ONE_YOCTO,
         });
-        if self.funded(company)? >= amount {
+        if self
+            .0
+            .retry
+            .eventually(|| Ok(self.funded(company)? >= amount))
+        {
             return Ok(());
         }
         Err(ClientError::Payout(sent.err().unwrap_or_else(|| {
@@ -231,12 +293,12 @@ impl PayoutExecutor for NearPayouts {
         })))
     }
 
+    /// Safe to send again: the contract refuses to pay the same index twice.
     fn pay(
         &mut self,
         company: &CompanyId,
         instruction: &PayoutInstruction,
     ) -> Result<(), ClientError> {
-        self.register_with_token(&instruction.recipient)?;
         let arguments = json!({
             "company_id": company.as_str(),
             "index": instruction.index,
@@ -244,19 +306,29 @@ impl PayoutExecutor for NearPayouts {
             "amount": instruction.amount.value().to_string(),
             "signature": STANDARD.encode(instruction.signature.as_bytes()),
         });
-        let sent = self.0.near.call(&ContractCall {
-            contract: &self.0.contract,
-            method: "pay",
-            arguments: &arguments,
-            gas: &self.0.pay_gas,
-            deposit: &self.0.storage_deposit,
-        });
-        if self.is_paid(company, instruction.index)? {
-            return Ok(());
+        let mut failure = None;
+        for _ in 0..self.0.retry.attempts {
+            let sent = self
+                .register_with_token(&instruction.recipient)
+                .and_then(|()| {
+                    self.0
+                        .near
+                        .call(&ContractCall {
+                            contract: &self.0.contract,
+                            method: "pay",
+                            arguments: &arguments,
+                            gas: &self.0.pay_gas,
+                            deposit: &self.0.storage_deposit,
+                        })
+                        .map_err(ClientError::Payout)
+                });
+            if self.stays_paid(company, instruction.index) {
+                return Ok(());
+            }
+            failure = sent.err();
         }
-        Err(ClientError::Payout(sent.err().unwrap_or_else(|| {
-            "the payment is not recorded".to_owned()
-        })))
+        Err(failure
+            .unwrap_or_else(|| ClientError::Payout("the payment did not go through".to_owned())))
     }
 }
 
@@ -287,6 +359,47 @@ mod tests {
             amount,
             signature: SignatureBytes::from_bytes(signer.sign(digest.as_bytes()).to_bytes()),
         }
+    }
+
+    fn policy(checks: u32) -> RetryPolicy {
+        RetryPolicy {
+            attempts: 1,
+            checks,
+            check_interval: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn waiting_stops_as_soon_as_the_result_shows_up() {
+        let mut calls = 0;
+        assert!(policy(5).eventually(|| {
+            calls += 1;
+            Ok(calls == 3)
+        }));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn a_failed_read_means_not_yet() {
+        let mut calls = 0;
+        assert!(policy(3).eventually(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(ClientError::Transport("timeout".to_owned()))
+            } else {
+                Ok(true)
+            }
+        }));
+    }
+
+    #[test]
+    fn waiting_gives_up_when_the_checks_run_out() {
+        let mut calls = 0;
+        assert!(!policy(3).eventually(|| {
+            calls += 1;
+            Ok(false)
+        }));
+        assert_eq!(calls, 3);
     }
 
     fn funded(total: u128) -> LocalPayouts {

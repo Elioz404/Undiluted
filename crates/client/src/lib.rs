@@ -21,5 +21,5 @@ pub use near_cli::NearCli;
 pub use outlayer::{OutLayerConfig, OutLayerTransport};
 pub use party::Party;
 pub use payments::{LocalRail, OneClickConfig, OneClickRail, PaymentRail, Settlement};
-pub use payouts::{LocalPayouts, NearPayouts, NearPayoutsConfig, PayoutExecutor};
+pub use payouts::{LocalPayouts, NearPayouts, NearPayoutsConfig, PayoutExecutor, RetryPolicy};
 pub use transport::{EnclaveIdentity, Exchange, Transport};

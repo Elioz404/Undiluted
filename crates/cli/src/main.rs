@@ -9,7 +9,7 @@ use demo::{Destinations, Environment};
 use undiluted_client::{
     ClientError, LocalAnchors, LocalPayouts, LocalRail, LocalTransport, NearAnchors,
     NearAnchorsConfig, NearCli, NearPayouts, NearPayoutsConfig, OneClickConfig, OneClickRail,
-    OutLayerConfig, OutLayerTransport,
+    OutLayerConfig, OutLayerTransport, RetryPolicy,
 };
 
 #[derive(Parser)]
@@ -104,6 +104,14 @@ struct Deployment {
     /// Attached for contract storage. Whatever is not used comes back.
     #[arg(long, default_value = "0.01 NEAR")]
     distribution_deposit: String,
+    /// How many times to relay a payout that has not landed.
+    #[arg(long, default_value_t = 5)]
+    relay_attempts: u32,
+    /// How many times to look for the result of each relay.
+    #[arg(long, default_value_t = 6)]
+    settle_checks: u32,
+    #[arg(long, default_value_t = 5)]
+    settle_seconds: u64,
     /// Path to the near command-line tool.
     #[arg(long, default_value = "near")]
     near_cli: PathBuf,
@@ -153,6 +161,11 @@ fn run_deployed(deployment: Deployment) -> Result<(), ClientError> {
         fund_gas: deployment.funding_gas,
         storage_deposit: deployment.distribution_deposit,
         token_storage_deposit: deployment.token_storage_deposit.clone(),
+        retry: RetryPolicy {
+            attempts: deployment.relay_attempts,
+            checks: deployment.settle_checks,
+            check_interval: Duration::from_secs(deployment.settle_seconds),
+        },
     });
     let rail = OneClickRail::new(
         OneClickConfig {
