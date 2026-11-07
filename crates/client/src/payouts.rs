@@ -157,7 +157,7 @@ impl RetryPolicy {
 
 #[derive(Debug, Clone)]
 pub struct NearPayoutsConfig {
-    /// Signs, funds and relays.
+    /// Signs, funds and relays. Its account owns the distributions it opens.
     pub near: NearCli,
     pub contract: String,
     /// The NEP-141 token proceeds are paid in, with six decimals.
@@ -201,7 +201,7 @@ impl NearPayouts {
             &self.0.rpc_url,
             &self.0.contract,
             "distribution",
-            &json!({ "company_id": company.as_str() }),
+            &json!({ "funder": self.0.near.signer, "company_id": company.as_str() }),
         )?;
         distribution["funded"]
             .as_str()
@@ -215,7 +215,7 @@ impl NearPayouts {
             &self.0.rpc_url,
             &self.0.contract,
             "is_paid",
-            &json!({ "company_id": company.as_str(), "index": index }),
+            &json!({ "funder": self.0.near.signer, "company_id": company.as_str(), "index": index }),
         )?;
         Ok(paid.as_bool().unwrap_or(false))
     }
@@ -225,7 +225,7 @@ impl NearPayouts {
             &self.0.rpc_url,
             &self.0.contract,
             "distribution",
-            &json!({ "company_id": company.as_str() }),
+            &json!({ "funder": self.0.near.signer, "company_id": company.as_str() }),
         )?;
         Ok(!distribution.is_null())
     }
@@ -310,6 +310,7 @@ impl PayoutExecutor for NearPayouts {
         instruction: &PayoutInstruction,
     ) -> Result<(), ClientError> {
         let arguments = json!({
+            "funder": self.0.near.signer,
             "company_id": company.as_str(),
             "index": instruction.index,
             "recipient": instruction.recipient,

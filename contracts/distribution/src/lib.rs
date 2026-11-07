@@ -3,6 +3,10 @@
 //! The enclave decides who gets what but holds no funds. This contract holds the
 //! funds but decides nothing: it pays only what the enclave signed, each payment
 //! once, and never more than what was deposited.
+//!
+//! A distribution belongs to the account that opened and funds it. Anyone can
+//! open one for any company, with their own money, and that never blocks or
+//! touches anyone else's.
 
 use near_sdk::borsh::to_vec;
 use near_sdk::json_types::{Base64VecU8, U128};
@@ -38,16 +42,35 @@ pub struct Distribution {
     pub paid: U128,
 }
 
+/// Who funds a distribution and for which company.
+type DistributionId = (AccountId, String);
+
 #[near(event_json(standard = "undiluted_distribution"))]
 pub enum DistributionEvent {
-    #[event_version("1.0.0")]
-    Opened { company_id: String, total: U128 },
-    #[event_version("1.0.0")]
-    Funded { company_id: String, amount: U128 },
-    #[event_version("1.0.0")]
-    Paid { company_id: String, index: u32 },
-    #[event_version("1.0.0")]
-    PaymentFailed { company_id: String, index: u32 },
+    #[event_version("2.0.0")]
+    Opened {
+        funder: AccountId,
+        company_id: String,
+        total: U128,
+    },
+    #[event_version("2.0.0")]
+    Funded {
+        funder: AccountId,
+        company_id: String,
+        amount: U128,
+    },
+    #[event_version("2.0.0")]
+    Paid {
+        funder: AccountId,
+        company_id: String,
+        index: u32,
+    },
+    #[event_version("2.0.0")]
+    PaymentFailed {
+        funder: AccountId,
+        company_id: String,
+        index: u32,
+    },
 }
 
 #[ext_contract(ext_token)]
@@ -57,14 +80,14 @@ pub trait FungibleToken {
 
 #[ext_contract(ext_self)]
 pub trait Callbacks {
-    fn on_paid(&mut self, company_id: String, index: u32, amount: U128);
+    fn on_paid(&mut self, funder: AccountId, company_id: String, index: u32, amount: U128);
 }
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct DistributionRegistry {
-    distributions: LookupMap<String, Distribution>,
-    paid: LookupSet<(String, u32)>,
+    distributions: LookupMap<DistributionId, Distribution>,
+    paid: LookupSet<(AccountId, String, u32)>,
 }
 
 #[near]
@@ -78,7 +101,8 @@ impl DistributionRegistry {
         }
     }
 
-    /// Starts a distribution. The token, enclave and total can never change.
+    /// Starts the caller's distribution for a company. The token, enclave and
+    /// total can never change.
     #[payable]
     pub fn open(
         &mut self,
@@ -93,12 +117,14 @@ impl DistributionRegistry {
             enclave_key.curve_type() == CurveType::ED25519,
             "enclave key must be ed25519",
         );
+        let funder = env::predecessor_account_id();
+        let id = (funder.clone(), company_id.clone());
         ensure(
-            !self.distributions.contains_key(&company_id),
+            !self.distributions.contains_key(&id),
             "distribution already exists",
         );
         self.distributions.insert(
-            company_id.clone(),
+            id,
             Distribution {
                 token,
                 enclave_key,
@@ -109,21 +135,25 @@ impl DistributionRegistry {
         );
         self.distributions.flush();
         settle_storage(storage_before, env::attached_deposit());
-        DistributionEvent::Opened { company_id, total }.emit();
+        DistributionEvent::Opened {
+            funder,
+            company_id,
+            total,
+        }
+        .emit();
     }
 
-    /// Receives funds. `msg` names the company. Anything beyond the total goes
-    /// straight back to the sender.
+    /// Receives funds into the sender's own distribution; `msg` names the
+    /// company. Anything beyond the total goes straight back to the sender.
     pub fn ft_on_transfer(
         &mut self,
         sender_id: AccountId,
         amount: U128,
         msg: String,
     ) -> PromiseOrValue<U128> {
-        let _ = sender_id;
         let distribution = self
             .distributions
-            .get_mut(&msg)
+            .get_mut(&(sender_id.clone(), msg.clone()))
             .unwrap_or_else(|| refuse("unknown distribution"));
         ensure(
             env::predecessor_account_id() == distribution.token,
@@ -133,6 +163,7 @@ impl DistributionRegistry {
         let accepted = missing.min(amount.0);
         distribution.funded = U128(distribution.funded.0 + accepted);
         DistributionEvent::Funded {
+            funder: sender_id,
             company_id: msg,
             amount: U128(accepted),
         }
@@ -140,11 +171,13 @@ impl DistributionRegistry {
         PromiseOrValue::Value(U128(amount.0 - accepted))
     }
 
-    /// Makes one payment. Anyone may relay it, because only the enclave's
-    /// signature makes it valid, and the signature covers recipient and amount.
+    /// Makes one payment from `funder`'s distribution. Anyone may relay it,
+    /// because only the enclave's signature makes it valid, and the signature
+    /// covers recipient and amount.
     #[payable]
     pub fn pay(
         &mut self,
+        funder: AccountId,
         company_id: String,
         index: u32,
         recipient: AccountId,
@@ -152,12 +185,12 @@ impl DistributionRegistry {
         signature: Base64VecU8,
     ) -> Promise {
         let storage_before = env::storage_usage();
-        let key = (company_id.clone(), index);
+        let key = (funder.clone(), company_id.clone(), index);
         ensure(!self.paid.contains(&key), "already paid");
 
         let distribution = self
             .distributions
-            .get_mut(&company_id)
+            .get_mut(&(funder.clone(), company_id.clone()))
             .unwrap_or_else(|| refuse("unknown distribution"));
         ensure(
             is_valid_instruction(
@@ -186,7 +219,7 @@ impl DistributionRegistry {
             .then(
                 ext_self::ext(env::current_account_id())
                     .with_static_gas(ON_PAID_GAS)
-                    .on_paid(company_id, index, amount),
+                    .on_paid(funder, company_id, index, amount),
             )
     }
 
@@ -194,30 +227,69 @@ impl DistributionRegistry {
     #[private]
     pub fn on_paid(
         &mut self,
+        funder: AccountId,
         company_id: String,
         index: u32,
         amount: U128,
         #[callback_result] result: Result<(), PromiseError>,
     ) {
         if result.is_ok() {
-            DistributionEvent::Paid { company_id, index }.emit();
+            DistributionEvent::Paid {
+                funder,
+                company_id,
+                index,
+            }
+            .emit();
             return;
         }
-        if let Some(distribution) = self.distributions.get_mut(&company_id) {
+        let id = (funder.clone(), company_id.clone());
+        if let Some(distribution) = self.distributions.get_mut(&id) {
             distribution.paid = U128(distribution.paid.0.saturating_sub(amount.0));
         }
-        self.paid.remove(&(company_id.clone(), index));
-        DistributionEvent::PaymentFailed { company_id, index }.emit();
+        self.paid
+            .remove(&(funder.clone(), company_id.clone(), index));
+        DistributionEvent::PaymentFailed {
+            funder,
+            company_id,
+            index,
+        }
+        .emit();
     }
 
     #[must_use]
-    pub fn distribution(&self, company_id: String) -> Option<Distribution> {
-        self.distributions.get(&company_id).cloned()
+    pub fn distribution(&self, funder: AccountId, company_id: String) -> Option<Distribution> {
+        self.distributions.get(&(funder, company_id)).cloned()
     }
 
     #[must_use]
-    pub fn is_paid(&self, company_id: String, index: u32) -> bool {
-        self.paid.contains(&(company_id, index))
+    pub fn is_paid(&self, funder: AccountId, company_id: String, index: u32) -> bool {
+        self.paid.contains(&(funder, company_id, index))
+    }
+
+    /// Whether the enclave behind `funder`'s distribution signed this payment.
+    /// A relay checks it before spending anything on a payout.
+    #[must_use]
+    pub fn verifies(
+        &self,
+        funder: AccountId,
+        company_id: String,
+        index: u32,
+        recipient: AccountId,
+        amount: U128,
+        signature: Base64VecU8,
+    ) -> bool {
+        self.distributions
+            .get(&(funder, company_id.clone()))
+            .is_some_and(|distribution| {
+                is_valid_instruction(
+                    &distribution.enclave_key,
+                    &company_id,
+                    index,
+                    &recipient,
+                    amount.0,
+                    &signature.0,
+                )
+            })
     }
 }
 
@@ -326,7 +398,7 @@ mod tests {
     }
 
     fn opened() -> DistributionRegistry {
-        act_as(accounts(0), DEPOSIT);
+        act_as(funder(), DEPOSIT);
         let mut registry = DistributionRegistry::new();
         registry.open(
             COMPANY.to_owned(),
@@ -337,9 +409,13 @@ mod tests {
         registry
     }
 
+    fn funder() -> AccountId {
+        accounts(0)
+    }
+
     fn fund(registry: &mut DistributionRegistry, amount: u128) -> u128 {
         act_as(token(), NearToken::from_yoctonear(0));
-        let unused = registry.ft_on_transfer(accounts(0), U128(amount), COMPANY.to_owned());
+        let unused = registry.ft_on_transfer(funder(), U128(amount), COMPANY.to_owned());
         act_as(accounts(1), DEPOSIT);
         match unused {
             PromiseOrValue::Value(unused) => unused.0,
@@ -356,6 +432,7 @@ mod tests {
     fn pay(registry: &mut DistributionRegistry, seed: u8, index: u32, amount: u128) {
         let signature = sign(seed, index, &recipient(), amount);
         drop(registry.pay(
+            funder(),
             COMPANY.to_owned(),
             index,
             recipient(),
@@ -365,7 +442,11 @@ mod tests {
     }
 
     fn paid_total(registry: &DistributionRegistry) -> u128 {
-        registry.distribution(COMPANY.to_owned()).unwrap().paid.0
+        registry
+            .distribution(funder(), COMPANY.to_owned())
+            .unwrap()
+            .paid
+            .0
     }
 
     #[test]
@@ -374,7 +455,11 @@ mod tests {
         assert_eq!(fund(&mut registry, 70), 0);
         assert_eq!(fund(&mut registry, 70), 40);
         assert_eq!(
-            registry.distribution(COMPANY.to_owned()).unwrap().funded.0,
+            registry
+                .distribution(funder(), COMPANY.to_owned())
+                .unwrap()
+                .funded
+                .0,
             TOTAL
         );
     }
@@ -384,14 +469,14 @@ mod tests {
     fn another_token_cannot_fund_it() {
         let mut registry = opened();
         act_as(accounts(3), NearToken::from_yoctonear(0));
-        drop(registry.ft_on_transfer(accounts(0), U128(1), COMPANY.to_owned()));
+        drop(registry.ft_on_transfer(funder(), U128(1), COMPANY.to_owned()));
     }
 
     #[test]
     fn an_enclave_signed_payment_can_be_relayed_by_anyone() {
         let mut registry = funded();
         pay(&mut registry, ENCLAVE_SEED, 0, 60);
-        assert!(registry.is_paid(COMPANY.to_owned(), 0));
+        assert!(registry.is_paid(funder(), COMPANY.to_owned(), 0));
         assert_eq!(paid_total(&registry), 60);
     }
 
@@ -407,7 +492,14 @@ mod tests {
     fn a_relay_cannot_change_the_recipient() {
         let mut registry = funded();
         let signature = sign(ENCLAVE_SEED, 0, &recipient(), 60);
-        drop(registry.pay(COMPANY.to_owned(), 0, accounts(3), U128(60), signature));
+        drop(registry.pay(
+            funder(),
+            COMPANY.to_owned(),
+            0,
+            accounts(3),
+            U128(60),
+            signature,
+        ));
     }
 
     #[test]
@@ -415,7 +507,14 @@ mod tests {
     fn a_relay_cannot_change_the_amount() {
         let mut registry = funded();
         let signature = sign(ENCLAVE_SEED, 0, &recipient(), 60);
-        drop(registry.pay(COMPANY.to_owned(), 0, recipient(), U128(90), signature));
+        drop(registry.pay(
+            funder(),
+            COMPANY.to_owned(),
+            0,
+            recipient(),
+            U128(90),
+            signature,
+        ));
     }
 
     #[test]
@@ -449,9 +548,15 @@ mod tests {
             std::collections::HashMap::default(),
             vec![PromiseResult::Failed],
         );
-        registry.on_paid(COMPANY.to_owned(), 0, U128(60), Err(PromiseError::Failed));
+        registry.on_paid(
+            funder(),
+            COMPANY.to_owned(),
+            0,
+            U128(60),
+            Err(PromiseError::Failed),
+        );
 
-        assert!(!registry.is_paid(COMPANY.to_owned(), 0));
+        assert!(!registry.is_paid(funder(), COMPANY.to_owned(), 0));
         assert_eq!(paid_total(&registry), 0);
         act_as(accounts(1), DEPOSIT);
         pay(&mut registry, ENCLAVE_SEED, 0, 60);
@@ -468,5 +573,59 @@ mod tests {
             public_key(FORGER_SEED),
             U128(TOTAL),
         );
+    }
+
+    #[test]
+    fn someone_else_opening_the_same_company_changes_nothing_for_the_funder() {
+        let mut registry = opened();
+        act_as(accounts(3), DEPOSIT);
+        registry.open(
+            COMPANY.to_owned(),
+            token(),
+            public_key(FORGER_SEED),
+            U128(1),
+        );
+
+        fund(&mut registry, TOTAL);
+        pay(&mut registry, ENCLAVE_SEED, 0, 60);
+        assert_eq!(paid_total(&registry), 60);
+        assert_eq!(
+            registry
+                .distribution(accounts(3), COMPANY.to_owned())
+                .unwrap()
+                .funded
+                .0,
+            0
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown distribution")]
+    fn funds_only_reach_the_senders_own_distribution() {
+        let mut registry = opened();
+        act_as(token(), NearToken::from_yoctonear(0));
+        drop(registry.ft_on_transfer(accounts(3), U128(1), COMPANY.to_owned()));
+    }
+
+    #[test]
+    fn a_payment_can_be_checked_before_relaying_it() {
+        let registry = funded();
+        let signature = sign(ENCLAVE_SEED, 0, &recipient(), 60);
+        assert!(registry.verifies(
+            funder(),
+            COMPANY.to_owned(),
+            0,
+            recipient(),
+            U128(60),
+            signature.clone()
+        ));
+        assert!(!registry.verifies(
+            funder(),
+            COMPANY.to_owned(),
+            0,
+            recipient(),
+            U128(61),
+            signature
+        ));
     }
 }
