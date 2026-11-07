@@ -13,6 +13,8 @@ Built for NEAR HACKATHON (November 2026). Runs on NEAR testnet.
 so the first action can take a minute). Press **Verify the enclave** to check its
 Intel TDX attestation in your browser, then **Start a demo company**.
 
+https://github.com/user-attachments/assets/a3539921-e0a2-452b-a00b-d23f73801d28
+
 ## The problem
 
 A startup's cap table is a private spreadsheet or a vendor database. Investors
