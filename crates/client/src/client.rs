@@ -27,7 +27,7 @@ impl<T: Transport> Client<T> {
         company: CompanyId,
         max_attempts: u32,
     ) -> Result<Self, ClientError> {
-        let identity = transport.identity()?;
+        let identity = retrying(max_attempts, || transport.identity())?;
         Ok(Self {
             transport,
             identity,
@@ -70,14 +70,8 @@ impl<T: Transport> Client<T> {
         };
         let encoded = to_vec(&request).map_err(|_| ClientError::Encoding)?;
 
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            match self.exchange(&encoded, &digest) {
-                Err(ClientError::Transport(_)) if attempts < self.max_attempts => {}
-                result => return result,
-            }
-        }
+        let max_attempts = self.max_attempts;
+        retrying(max_attempts, || self.exchange(&encoded, &digest))
     }
 
     fn exchange(&mut self, encoded: &[u8], request: &Digest) -> Result<Response, ClientError> {
@@ -146,6 +140,21 @@ impl<T: Transport> Client<T> {
             other => Err(ClientError::Protocol(format!(
                 "unexpected answer: {other:?}"
             ))),
+        }
+    }
+}
+
+/// Repeats `call` only while the failure happened on the way to the enclave.
+fn retrying<R>(
+    max_attempts: u32,
+    mut call: impl FnMut() -> Result<R, ClientError>,
+) -> Result<R, ClientError> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match call() {
+            Err(ClientError::Transport(_)) if attempts < max_attempts => {}
+            result => return result,
         }
     }
 }

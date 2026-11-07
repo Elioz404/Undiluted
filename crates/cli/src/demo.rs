@@ -10,7 +10,7 @@ use undiluted_service::{Actor, Command, Response, Statement};
 
 const MICROS_PER_DOLLAR: u128 = 1_000_000;
 const RATIO_PER_BASIS_POINT: u128 = 100_000_000_000_000;
-const MAX_ATTEMPTS: u32 = 4;
+const MAX_ATTEMPTS: u32 = 8;
 
 const FOUNDER_SHARES: u128 = 8_000_000;
 const ANA_INVESTMENT: u128 = 250_000;
