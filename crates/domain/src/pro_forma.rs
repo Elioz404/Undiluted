@@ -55,8 +55,17 @@ impl ProForma {
 }
 
 impl CapTable {
+    /// Fails only when instruments exist but no shares to measure them
+    /// against. A company that issued nothing yet has an empty table.
     pub fn pro_forma(&self) -> Result<ProForma, CapTableError> {
         let existing = self.issued_shares()?.checked_add(self.option_pool())?;
+        if existing.is_zero() && self.holdings().is_empty() {
+            return Ok(ProForma {
+                capitalization: Shares::new(0),
+                option_pool: Shares::new(0),
+                lines: Vec::new(),
+            });
+        }
         if existing.is_zero() {
             return Err(CapTableError::NoShares);
         }
@@ -132,6 +141,27 @@ mod tests {
             )
             .unwrap();
         table
+    }
+
+    #[test]
+    fn a_company_that_issued_nothing_has_an_empty_table() {
+        let view = CapTable::new().pro_forma().unwrap();
+        assert_eq!(view.lines, Vec::new());
+        assert!(view.capitalization.is_zero());
+        assert!(view.reconciles().unwrap());
+    }
+
+    #[test]
+    fn instruments_without_any_shares_cannot_be_measured() {
+        let mut table = CapTable::new();
+        table
+            .issue_safe(
+                instrument("s"),
+                holder("ana"),
+                Safe::new(usd(1), SafeTerms::new(Some(usd(10)), None, false).unwrap()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(table.pro_forma(), Err(CapTableError::NoShares));
     }
 
     #[test]
