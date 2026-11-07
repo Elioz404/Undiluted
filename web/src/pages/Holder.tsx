@@ -41,25 +41,28 @@ export function Holder({ company, holder }: { company: string; holder: string })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [company, holder]);
 
+  /** Refreshes only after a success, so a failure stays on screen. */
   async function sign() {
     if (!proposal) return;
-    await run("Signing", async () => {
+    const signed = await run("Signing", async () => {
       const response = await send({ kind: "sign", digest: proposal.digest });
       if (response.kind === "rejected") throw new Error(response.reason);
       setNotice(response.kind === "committed" ? "Signed and recorded." : "Signed.");
       setProposal(null);
+      return true;
     });
-    await refresh();
+    if (signed) await refresh();
   }
 
   async function act(event: Parameters<Session["commit"]>[1], label: string) {
-    await run(label, async () => {
+    const recorded = await run(label, async () => {
       const secret = await holderKey(company, holder);
       const response = await session.commit({ actor, secret }, event, [{ actor, secret }]);
       if (response.kind === "rejected") throw new Error(response.reason);
       setNotice("Recorded.");
+      return true;
     });
-    await refresh();
+    if (recorded) await refresh();
   }
 
   async function pay() {
