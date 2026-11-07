@@ -1,0 +1,17 @@
+[package]
+name = "undiluted-domain"
+description = "Cap table rules: instruments, SAFE conversion, MFN and exit distribution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+borsh.workspace = true
+primitive-types.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

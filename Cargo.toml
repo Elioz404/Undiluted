@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/domain"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+borsh = { version = "1", features = ["derive"] }
+primitive-types = { version = "0.13", default-features = false }
+proptest = "1"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true
