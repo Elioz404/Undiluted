@@ -22,9 +22,11 @@ pub enum Input {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Output {
+    /// The encryption key comes with the signing key's signature over it.
     Identity {
         encryption_key: String,
         signing_key: String,
+        encryption_key_signature: String,
     },
     Reply {
         envelope: String,
@@ -66,10 +68,14 @@ pub fn run<S: Store, K: EnclaveSigner, C: ChainReader>(
 }
 
 fn identity<S: Store, K: EnclaveSigner, C: ChainReader>(gateway: &Gateway<S, K, C>) -> Output {
-    match gateway.signing_key() {
-        Ok(signing_key) => Output::Identity {
+    let signed = gateway
+        .signing_key()
+        .and_then(|key| Ok((key, gateway.encryption_key_signature()?)));
+    match signed {
+        Ok((signing_key, signature)) => Output::Identity {
             encryption_key: hex::encode(gateway.encryption_key()),
             signing_key: hex::encode(signing_key.as_bytes()),
+            encryption_key_signature: hex::encode(signature.as_bytes()),
         },
         Err(error) => Output::Error {
             message: error.to_string(),

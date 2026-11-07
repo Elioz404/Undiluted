@@ -2,7 +2,7 @@
 
 use borsh::{from_slice, to_vec};
 use undiluted_envelope::{EnclaveSecret, ReplyKey, open_request};
-use undiluted_ledger::PublicKey;
+use undiluted_ledger::{PublicKey, SignatureBytes};
 
 use crate::chain::ChainReader;
 use crate::error::ServiceError;
@@ -38,6 +38,11 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Gateway<S, K, C> {
     /// The key clients check replies against.
     pub fn signing_key(&self) -> Result<PublicKey, StoreError> {
         self.service.signing_key()
+    }
+
+    /// The signing key's signature over the encryption key.
+    pub fn encryption_key_signature(&self) -> Result<SignatureBytes, StoreError> {
+        self.service.sign_encryption_key(&self.encryption_key())
     }
 
     /// Fails only when no authentic reply can be produced at all: an envelope

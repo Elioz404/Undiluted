@@ -16,6 +16,7 @@ use crate::error::WebError;
 struct Identity {
     encryption_key: String,
     signing_key: String,
+    encryption_key_signature: String,
 }
 
 /// A request ready to send, with what is needed to read its reply.
@@ -60,13 +61,25 @@ pub fn subscription_memo(company: &str, key: &str) -> Result<String, WebError> {
     ))
 }
 
+/// Accepts an identity only if its signing key vouches for its encryption key,
+/// so whoever relays it cannot substitute a key of their own.
 fn parse_identity(identity: &str) -> Result<([u8; 32], PublicKey), WebError> {
     let identity: Identity =
         serde_json::from_str(identity).map_err(|error| WebError::input(&error))?;
-    Ok((
-        decode_key(&identity.encryption_key)?,
-        PublicKey::from_bytes(decode_key(&identity.signing_key)?),
-    ))
+    let encryption_key = decode_key(&identity.encryption_key)?;
+    let signing_key = PublicKey::from_bytes(decode_key(&identity.signing_key)?);
+    let signature = hex::decode(&identity.encryption_key_signature)
+        .ok()
+        .and_then(|bytes| <[u8; 64]>::try_from(bytes).ok())
+        .map(SignatureBytes::from_bytes)
+        .ok_or_else(|| WebError::Input("malformed identity signature".to_owned()))?;
+    if !signing_key.verifies(
+        &undiluted_service::identity_digest(&encryption_key),
+        &signature,
+    ) {
+        return Err(WebError::UnauthenticReply);
+    }
+    Ok((encryption_key, signing_key))
 }
 
 fn into_command(command: CommandDto, key: &SigningKey) -> Result<Command, WebError> {

@@ -19,6 +19,7 @@ pub use memory::MemoryStore;
 pub use ports::{EnclaveSigner, Store, StoreError};
 pub use protocol::{
     Actor, Command, CompanyView, HeadAttestation, HolderExit, PayoutInstruction, PayoutPlan,
-    ProposalView, Reply, RequestId, Response, SignedRequest, Statement, subscription_memo,
+    ProposalView, Reply, RequestId, Response, SignedRequest, Statement, identity_digest,
+    subscription_memo,
 };
 pub use service::Service;

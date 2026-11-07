@@ -298,3 +298,19 @@ fn bad_input_is_an_error_not_a_panic() {
         assert!(prepare_request(&browser.identity, COMPANY, actor, &command, &secret).is_err());
     }
 }
+
+#[test]
+fn an_identity_with_a_swapped_encryption_key_is_refused() {
+    let browser = Browser::new();
+    let mut identity: serde_json::Value = serde_json::from_str(&browser.identity).unwrap();
+    identity["encryption_key"] = json!("11".repeat(32));
+    let swapped = identity.to_string();
+    let request = prepare_request(
+        &swapped,
+        COMPANY,
+        &company_actor().to_string(),
+        &json!({ "kind": "create_company" }).to_string(),
+        &secret(1),
+    );
+    assert!(request.is_err());
+}
