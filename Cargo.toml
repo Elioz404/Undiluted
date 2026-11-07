@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/ledger"]
+members = ["crates/domain", "crates/ledger", "contracts/anchor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 borsh = { version = "1", features = ["derive"] }
 ed25519-dalek = "2"
+near-sdk = "5.30"
 primitive-types = { version = "0.13", default-features = false }
 proptest = "1"
 sha2 = "0.10"
