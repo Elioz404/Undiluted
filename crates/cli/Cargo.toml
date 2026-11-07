@@ -1,0 +1,21 @@
+[package]
+name = "undiluted-cli"
+description = "Command-line demo of Undiluted"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "undiluted"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+hex.workspace = true
+undiluted-client.workspace = true
+undiluted-domain.workspace = true
+undiluted-ledger.workspace = true
+undiluted-service.workspace = true
+
+[lints]
+workspace = true
