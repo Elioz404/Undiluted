@@ -4,19 +4,38 @@ import { createRoot } from "react-dom/client";
 import { Company } from "./pages/Company.tsx";
 import { Holder } from "./pages/Holder.tsx";
 import { Landing } from "./pages/Landing.tsx";
-import { useRoute } from "./router.ts";
+import { useRoute, type Route } from "./router.ts";
 import "./styles.css";
+
+/** Where you are: the company, then whose view this is. */
+function Crumbs({ route }: { route: Route }) {
+  if (route.page === "landing") {
+    return null;
+  }
+  return (
+    <nav className="crumbs" aria-label="Breadcrumb">
+      <span className="id optional">{route.company}</span>
+      <span className="sep optional" aria-hidden>
+        /
+      </span>
+      <span aria-current="page">{route.page === "company" ? "Company" : `Investor ${route.holder}`}</span>
+    </nav>
+  );
+}
 
 function App() {
   const route = useRoute();
   return (
     <>
-      <nav className="nav">
-        <a href="#/" className="brand">
-          Undiluted
-        </a>
-        <span className="muted">NEAR testnet</span>
-      </nav>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <a href="#/" className="wordmark" aria-label="Undiluted, home">
+            Undiluted
+          </a>
+          <Crumbs route={route} />
+          <span className="network">NEAR testnet</span>
+        </div>
+      </header>
       {route.page === "company" && <Company key={route.company} company={route.company} />}
       {route.page === "holder" && <Holder key={`${route.company}/${route.holder}`} company={route.company} holder={route.holder} />}
       {route.page === "landing" && <Landing />}

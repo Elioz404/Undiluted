@@ -1,4 +1,4 @@
-import { useAction, Card, Notice } from "../components/ui.tsx";
+import { useAction } from "../components/ui.tsx";
 import { companyKey, holderKey } from "../lib/keys.ts";
 import { enclaveIdentity, publicKeyOf, Session } from "../lib/protocol.ts";
 import { relay } from "../lib/relay.ts";
@@ -6,6 +6,7 @@ import { navigate } from "../router.ts";
 
 const FOUNDER = "founder";
 const FOUNDER_SHARES = "8000000";
+const SOURCE = "https://github.com/Elioz404/Undiluted";
 
 function newCompanyId(): string {
   const suffix = crypto.getRandomValues(new Uint8Array(4));
@@ -52,32 +53,86 @@ export function Landing() {
   return (
     <main className="page">
       <section className="hero">
-        <h1>A cap table nobody can quietly dilute</h1>
-        <p>
-          Each investor sees only their own position, yet can check that the total adds up and that the history is the one
-          everyone else sees. The table lives in a TEE; NEAR holds the proof.
-        </p>
-        <button type="button" onClick={start} disabled={busy}>
-          Start a demo company
-        </button>
-        {status}
+        <div>
+          <h1>A cap table nobody can quietly dilute</h1>
+          <p className="lead">Each investor sees only their own stake, and can prove nothing changed behind their back.</p>
+          <div className="actions">
+            <button type="button" className="btn btn-ink btn-hero" onClick={start} disabled={busy}>
+              Start a demo company
+            </button>
+            {status}
+          </div>
+        </div>
+        <ExampleStatement />
       </section>
 
-      <div className="grid">
-        <Card title="Private by default">
-          <p>Requests and replies are encrypted end to end between your browser and the enclave. The relay in between only sees ciphertext.</p>
-        </Card>
-        <Card title="Payments are checked">
-          <p>A SAFE is accepted only if the enclave finds the exact payment arriving at the treasury on chain, and no other SAFE uses it.</p>
-        </Card>
-        <Card title="Rights enforce themselves">
-          <p>An MFN holder adopts better later terms on their own. At an exit the payouts go out with one approval and cannot be redirected.</p>
-        </Card>
-      </div>
+      <dl className="guarantees">
+        <div>
+          <dt>Private by default</dt>
+          <dd>The table lives in a TEE. Your browser and the enclave talk end to end; the relay only carries ciphertext.</dd>
+        </div>
+        <div>
+          <dt>Paid means paid</dt>
+          <dd>A SAFE is recorded only when its exact payment reached the treasury on chain, and only once.</dd>
+        </div>
+        <div>
+          <dt>Rights enforce themselves</dt>
+          <dd>An MFN holder adopts better terms alone. At a sale, payouts follow the waterfall and cannot be redirected.</dd>
+        </div>
+      </dl>
 
-      <Notice>
-        This demo runs on NEAR testnet with test tokens that have no value. Keys are created in this browser and never leave it.
-      </Notice>
+      <footer className="footer">
+        <span>Runs on NEAR testnet with test tokens of no value. Keys stay in your browser.</span>
+        <a href={SOURCE} target="_blank" rel="noreferrer">
+          Source on GitHub
+        </a>
+      </footer>
     </main>
+  );
+}
+
+/** What an investor's view looks like, with illustrative figures. */
+function ExampleStatement() {
+  return (
+    <figure>
+      <div className="sheet">
+        <div className="sheet-head">
+          <h2>ana</h2>
+          <span className="muted small">1 line</span>
+        </div>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Instrument</th>
+              <th className="num">Shares</th>
+              <th className="num">Ownership</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>
+                <span className="id">safe-ana</span>
+              </td>
+              <td className="num fig">640,000</td>
+              <td className="num fig">6.67%</td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td>Company total</td>
+              <td className="num fig">9,600,000</td>
+              <td className="num small">Adds up</td>
+            </tr>
+          </tfoot>
+        </table>
+        <div className="sheet-foot check-chain">
+          <span className="head">
+            History of 7 entries, head <span className="id">9f3c1a07e2…b81d44</span>
+          </span>
+          <span className="stamp">Matches NEAR</span>
+        </div>
+      </div>
+      <figcaption>An investor’s view, with example figures. Who else invested, and on what terms, never reaches it.</figcaption>
+    </figure>
   );
 }
