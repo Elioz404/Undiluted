@@ -4,6 +4,7 @@
 //! events (enclave, investor browser, tests) reaches exactly the same result.
 
 pub mod cap_table;
+pub mod conversion;
 pub mod error;
 pub mod ids;
 pub mod math;
@@ -11,6 +12,7 @@ pub mod quantity;
 pub mod safe;
 
 pub use cap_table::{CapTable, Holding, Position};
+pub use conversion::{NewInvestment, PreferredIssuance, PricedRound, RoundOutcome};
 pub use error::CapTableError;
 pub use ids::{HolderId, InstrumentId};
 pub use math::Ratio;
