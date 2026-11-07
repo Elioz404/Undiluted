@@ -48,7 +48,7 @@ impl ChainReader for LocalChain {
                     amount: Money::new(amount),
                 }]
             })
-            .ok_or_else(|| ChainError("no such transaction".to_owned()))
+            .ok_or_else(|| ChainError::Unavailable("no such transaction".to_owned()))
     }
 }
 

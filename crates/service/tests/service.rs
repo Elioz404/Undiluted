@@ -41,7 +41,7 @@ impl ChainReader for TestChain {
     fn token_transfers(&self, reference: &str) -> Result<Vec<TokenTransfer>, ChainError> {
         let parts: Vec<&str> = reference.split(':').collect();
         let [token, to, amount, _] = parts[..] else {
-            return Err(ChainError("no such transaction".to_owned()));
+            return Err(ChainError::Unavailable("no such transaction".to_owned()));
         };
         Ok(vec![TokenTransfer {
             token: token.to_owned(),

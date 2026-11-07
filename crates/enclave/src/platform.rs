@@ -14,8 +14,10 @@ wit_bindgen::generate!({
 
 const ENCRYPTION_KEY_PATH: &str = "ledger";
 const SIGNING_KEY_PATH: &str = "enclave";
-/// Only final transactions count, so a payment cannot be rolled back afterwards.
-const WAIT_UNTIL: &str = "FINAL";
+/// Asking without waiting answers at once, even for a transaction that does not
+/// exist. Waiting is only worth it for one that exists but is not final yet.
+const NO_WAIT: &str = "NONE";
+const UNTIL_FINAL: &str = "FINAL";
 
 fn failure(error: impl core::fmt::Debug) -> StoreError {
     StoreError(format!("{error:?}"))
@@ -74,10 +76,21 @@ impl ChainReader for NearChain {
     fn token_transfers(&self, reference: &str) -> Result<Vec<TokenTransfer>, ChainError> {
         // The sender only routes the query to a shard; any account finds it.
         let sender = env::signer_account_id().unwrap_or_default();
-        let (transaction, error) = near::rpc::api::tx_status(reference, &sender, WAIT_UNTIL);
-        if !error.is_empty() {
-            return Err(ChainError(error));
+        match lookup(reference, &sender, NO_WAIT) {
+            Err(ChainError::NotFinal) => lookup(reference, &sender, UNTIL_FINAL),
+            result => result,
         }
-        parse_transfers(&transaction)
     }
+}
+
+fn lookup(
+    reference: &str,
+    sender: &str,
+    wait_until: &str,
+) -> Result<Vec<TokenTransfer>, ChainError> {
+    let (transaction, error) = near::rpc::api::tx_status(reference, sender, wait_until);
+    if !error.is_empty() {
+        return Err(ChainError::Unavailable(error));
+    }
+    parse_transfers(&transaction)
 }

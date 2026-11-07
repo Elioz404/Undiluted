@@ -8,10 +8,16 @@ use undiluted_domain::Money;
 const EVENT_PREFIX: &str = "EVENT_JSON:";
 const FUNGIBLE_TOKEN_STANDARD: &str = "nep141";
 const TRANSFER_EVENT: &str = "ft_transfer";
+const FINAL: &str = "FINAL";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{0}")]
-pub struct ChainError(pub String);
+pub enum ChainError {
+    /// The transaction exists but could still be reorganised away.
+    #[error("the transaction is not final yet")]
+    NotFinal,
+    #[error("{0}")]
+    Unavailable(String),
+}
 
 /// Tokens that moved to an account in one settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,15 +34,18 @@ pub trait ChainReader {
 
 /// Extracts token transfers from a transaction as an RPC node returns it.
 ///
-/// Any contract can log any text, so a transfer only counts if the token's own
-/// contract logged it, in a receipt that succeeded.
+/// Only a final transaction counts. Any contract can log any text, so a transfer
+/// only counts if the token's own contract logged it, in a receipt that succeeded.
 pub fn parse_transfers(transaction: &str) -> Result<Vec<TokenTransfer>, ChainError> {
     let parsed: Value = serde_json::from_str(transaction)
-        .map_err(|error| ChainError(format!("unreadable transaction: {error}")))?;
+        .map_err(|error| ChainError::Unavailable(format!("unreadable transaction: {error}")))?;
     let transaction = parsed.get("result").unwrap_or(&parsed);
+    if transaction["final_execution_status"] != FINAL {
+        return Err(ChainError::NotFinal);
+    }
     let receipts = transaction["receipts_outcome"]
         .as_array()
-        .ok_or_else(|| ChainError("the transaction has no receipts".to_owned()))?;
+        .ok_or_else(|| ChainError::Unavailable("the transaction has no receipts".to_owned()))?;
 
     let mut transfers = Vec::new();
     for receipt in receipts {
@@ -101,6 +110,7 @@ mod tests {
 
     fn transaction(executor: &str, log: &str, status: &Value) -> String {
         json!({
+            "final_execution_status": "FINAL",
             "receipts_outcome": [{
                 "outcome": { "executor_id": executor, "logs": [log], "status": status },
             }],
@@ -155,8 +165,14 @@ mod tests {
     }
 
     #[test]
+    fn a_transaction_that_is_not_final_yet_does_not_count() {
+        let tx = json!({ "final_execution_status": "EXECUTED_OPTIMISTIC", "receipts_outcome": [] });
+        assert_eq!(parse_transfers(&tx.to_string()), Err(ChainError::NotFinal));
+    }
+
+    #[test]
     fn an_unknown_transaction_is_an_error() {
         assert!(parse_transfers("not json").is_err());
-        assert!(parse_transfers("{}").is_err());
+        assert!(parse_transfers(r#"{"final_execution_status":"FINAL"}"#).is_err());
     }
 }

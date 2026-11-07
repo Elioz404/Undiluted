@@ -222,7 +222,7 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         let transfers = self
             .chain
             .token_transfers(settlement.as_str())
-            .map_err(|error| ServiceError::SettlementUnconfirmed(error.0))?;
+            .map_err(|error| ServiceError::SettlementUnconfirmed(error.to_string()))?;
         let arrived = transfers.iter().any(|transfer| {
             transfer.token == treasury.token()
                 && transfer.to == treasury.account()
