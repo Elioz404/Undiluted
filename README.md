@@ -9,6 +9,10 @@ like MFN exercise themselves, and an exit pays everyone out with one approval.
 
 Built for NEAR HACKATHON (November 2026). Runs on NEAR testnet.
 
+**Try it live:** https://elioz404.github.io/Undiluted/ (the relay sleeps when idle,
+so the first action can take a minute). Press **Verify the enclave** to check its
+Intel TDX attestation in your browser, then **Start a demo company**.
+
 ## The problem
 
 A startup's cap table is a private spreadsheet or a vendor database. Investors
