@@ -1,13 +1,15 @@
 import { useState } from "react";
 
 import { shortHex } from "../lib/format.ts";
-import { relay } from "../lib/relay.ts";
+import { publishedHead, registeredEnclaveKey, trustedEnclaveKey } from "../lib/network.ts";
 
-type Result = "match" | "mismatch" | "missing" | "failed";
+type Result = "match" | "mismatch" | "missing" | "foreign" | "failed";
 
 /**
  * Compares the head the enclave showed this person with the one published on
- * chain. If they match, the history behind it is the same one everyone sees.
+ * chain, read from NEAR directly. If they match, and the company's history can
+ * only be extended by the enclave this site trusts, it is the same history
+ * everyone else sees.
  */
 export function Verify({ company, head, entries }: { company: string; head: string; entries: number }) {
   const [result, setResult] = useState<Result | null>(null);
@@ -16,8 +18,15 @@ export function Verify({ company, head, entries }: { company: string; head: stri
   async function check() {
     setChecking(true);
     try {
-      const published = await relay.headAt(company, entries - 1);
-      setResult(published.head === null ? "missing" : published.head === head ? "match" : "mismatch");
+      const [registered, published] = await Promise.all([
+        registeredEnclaveKey(company),
+        publishedHead(company, entries - 1),
+      ]);
+      if (registered !== trustedEnclaveKey()) {
+        setResult("foreign");
+      } else {
+        setResult(published === null ? "missing" : published === head ? "match" : "mismatch");
+      }
     } catch {
       setResult("failed");
     } finally {
@@ -42,6 +51,11 @@ export function Verify({ company, head, entries }: { company: string; head: stri
         {result === "missing" && "That head is not on chain yet. Try again in a moment."}
         {result === "failed" && "The chain could not be reached. Try again in a moment."}
       </p>
+      {result === "foreign" && (
+        <p className="check-result bad" role="alert">
+          This company's history on chain is not signed by the enclave this site trusts. Do not trust this view.
+        </p>
+      )}
       {result === "mismatch" && (
         <p className="check-result bad" role="alert">
           This does not match the head published on chain. Do not trust this view.

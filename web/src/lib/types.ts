@@ -128,7 +128,7 @@ export interface Anchor {
 }
 
 export type EnclaveOutput =
-  | { status: "identity"; encryption_key: string; signing_key: string }
+  | { status: "identity"; encryption_key: string; signing_key: string; encryption_key_signature: string }
   | { status: "reply"; envelope: string; anchor: Anchor | null }
   | { status: "error"; message: string };
 

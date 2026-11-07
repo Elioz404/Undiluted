@@ -1,6 +1,6 @@
 import { useAction } from "../components/ui.tsx";
 import { companyKey, holderKey } from "../lib/keys.ts";
-import { enclaveIdentity, publicKeyOf, Session } from "../lib/protocol.ts";
+import { publicKeyOf, Session } from "../lib/protocol.ts";
 import { relay } from "../lib/relay.ts";
 import { navigate } from "../router.ts";
 
@@ -23,11 +23,10 @@ export function Landing() {
       const secret = await companyKey(company);
       const asCompany = { actor: { role: "company" as const }, secret };
       const config = await relay.config();
-      const enclave = await enclaveIdentity();
 
       const response = await session.send(asCompany.actor, { kind: "create_company" }, secret);
       if (response.kind === "rejected") throw new Error(response.reason);
-      await relay.registerCompany(company, enclave.signing_key);
+      await relay.registerCompany(company);
 
       const treasury = await session.commit(
         asCompany,

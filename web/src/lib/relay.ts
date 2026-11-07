@@ -37,13 +37,10 @@ export const relay = {
   config: () => request<RelayConfig>("/config"),
   identity: () => request<EnclaveOutput>("/identity"),
   enclave: (envelope: string) => post<EnclaveOutput>("/enclave", { envelope }),
-  registerCompany: (company: string, enclaveKey: string) => post("/companies", { company, enclaveKey }),
+  registerCompany: (company: string) => post("/companies", { company }),
   publishAnchor: (anchor: Anchor) => post("/anchors", anchor),
-  headAt: (company: string, sequence: number) =>
-    request<{ head: string | null }>(`/anchors/${encodeURIComponent(company)}/${sequence}`),
   pay: (micros: string) => post<Settlement>("/payments", { micros }),
   paySubscription: (micros: string, memo: string) => post<Settlement>("/payments/subscription", { micros, memo }),
-  openPayouts: (company: string, enclaveKey: string, totalMicros: string) =>
-    post("/payouts/open", { company, enclaveKey, totalMicros }),
+  openPayouts: (company: string, totalMicros: string) => post("/payouts/open", { company, totalMicros }),
   payOut: (company: string, instruction: Instruction) => post("/payouts/pay", { company, instruction }),
 };

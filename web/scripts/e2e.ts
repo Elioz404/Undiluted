@@ -2,7 +2,10 @@
  * Walks the web interface's flow against a running relay, with the same wasm
  * protocol and the same code the pages use, printing every answer.
  *
- *   RELAY_URL=http://localhost:8080 npx tsx scripts/e2e.ts
+ *   RELAY_URL=http://localhost:8080 npx tsx --env-file=.env.local scripts/e2e.ts
+ *
+ * The VITE_* settings in .env.local tell it which enclave to trust and where
+ * to read heads from, as they do for the site.
  *
  * It spends test funds through the relay and takes a few minutes, because every
  * step is a real enclave run on chain.
@@ -12,11 +15,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { initSync } from "../src/wasm/undiluted_web.js";
-import { enclaveIdentity, generateKey, memoFor, publicKeyOf, Session } from "../src/lib/protocol.ts";
+import { useNetwork } from "../src/lib/network.ts";
+import { generateKey, memoFor, publicKeyOf, Session } from "../src/lib/protocol.ts";
 import { relay, useRelayAt } from "../src/lib/relay.ts";
 import type { Actor, Event, Response } from "../src/lib/types.ts";
 
 const PAYMENT_MICROS = "1000000";
+const EXIT_MICROS = "2000000";
 
 function step(title: string) {
   console.log(`\n> ${title}`);
@@ -33,17 +38,21 @@ function expect(response: Response, kind: Response["kind"]): Response {
 async function main() {
   initSync({ module: readFileSync(resolve(import.meta.dirname, "../src/wasm/undiluted_web_bg.wasm")) });
   useRelayAt(process.env.RELAY_URL ?? "http://localhost:8080");
+  useNetwork({
+    rpcUrl: process.env.VITE_NEAR_RPC_URL,
+    anchorContract: process.env.VITE_ANCHOR_CONTRACT,
+    enclaveSigningKey: process.env.VITE_ENCLAVE_SIGNING_KEY,
+  });
 
   const company = `e2e-${Date.now().toString(36)}`;
   const session = new Session(company);
   const config = await relay.config();
-  const enclave = await enclaveIdentity();
   const asCompany = { actor: { role: "company" } as Actor, secret: await generateKey() };
   const ana = { actor: { role: "holder", holder: "ana" } as Actor, secret: await generateKey() };
 
   step(`Create ${company}`);
   expect(await session.send(asCompany.actor, { kind: "create_company" }, asCompany.secret), "company_created");
-  await relay.registerCompany(company, enclave.signing_key);
+  await relay.registerCompany(company);
 
   step("Name the treasury");
   const treasury: Event = { kind: "treasury_designated", account: config.treasury, token: config.token };
@@ -121,6 +130,37 @@ async function main() {
     throw new Error("ben is not on the cap table");
   }
   expect(await session.send(ben.actor, { kind: "get_statement" }, ben.secret), "statement");
+
+  step("Each holder chooses where to be paid, and the company is sold");
+  for (const [holder, destination] of [
+    [ana, process.env.ANA_ACCOUNT ?? config.treasury],
+    [ben, process.env.BEN_ACCOUNT ?? config.treasury],
+  ] as const) {
+    const name = holder.actor.role === "holder" ? holder.actor.holder : "";
+    const chosen: Event = { kind: "payout_destination_set", holder: name, destination };
+    expect(await session.commit(holder, chosen, [holder]), "committed");
+  }
+  expect(await session.commit(asCompany, { kind: "exit_approved", proceeds_micros: EXIT_MICROS }, [asCompany]), "committed");
+  const plan = expect(await session.send(asCompany.actor, { kind: "get_payout_plan" }, asCompany.secret), "payout_plan");
+  if (plan.kind !== "payout_plan") return;
+
+  step("The relay funds its own distribution and relays the enclave's payouts");
+  console.log(`  ${JSON.stringify(await relay.openPayouts(company, plan.proceeds_micros))}`);
+  for (const instruction of plan.instructions) {
+    console.log(`  ${instruction.amount_micros} to ${instruction.recipient}: ${JSON.stringify(await relay.payOut(company, instruction))}`);
+  }
+
+  step("A payment the enclave did not sign is refused before the relay spends anything");
+  const [first] = plan.instructions;
+  if (first) {
+    const forged = { ...first, amount_micros: String(BigInt(first.amount_micros) + 1n) };
+    const refusal = await relay.payOut(company, forged).then(
+      () => "paid",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    console.log(`  ${refusal}`);
+    if (refusal === "paid") throw new Error("a forged payout was relayed");
+  }
 
   console.log("\nDone.");
 }

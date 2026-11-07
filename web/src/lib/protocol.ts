@@ -4,6 +4,7 @@
  */
 
 import init, { newParty, openReply, partyPublicKey, prepareRequest, subscriptionMemo } from "../wasm/undiluted_web.js";
+import { publishedHead, trustedEnclaveKey } from "./network.ts";
 import { relay, RelayError } from "./relay.ts";
 import type { Actor, Anchor, Command, EnclaveOutput, Event, Response } from "./types.ts";
 
@@ -15,13 +16,28 @@ export const ready = () => (loading ??= init());
 export type Identity = Extract<EnclaveOutput, { status: "identity" }>;
 
 let identity: Promise<Identity> | null = null;
+
+/**
+ * The enclave's keys, as the relay hands them out. They are used only if the
+ * signing key is the one this site trusts; the wasm then checks that this key
+ * signed the encryption key, so the relay cannot slip in a key of its own.
+ */
 export function enclaveIdentity(): Promise<Identity> {
-  identity ??= relay.identity().then((output) => {
-    if (output.status !== "identity") {
-      throw new Error("the enclave did not return its identity");
-    }
-    return output;
-  });
+  identity ??= relay
+    .identity()
+    .then((output) => {
+      if (output.status !== "identity") {
+        throw new Error("the enclave did not return its identity");
+      }
+      if (output.signing_key.toLowerCase() !== trustedEnclaveKey()) {
+        throw new Error("the relay offered an enclave this site does not trust");
+      }
+      return output;
+    })
+    .catch((error: unknown) => {
+      identity = null;
+      throw error;
+    });
   return identity;
 }
 
@@ -51,8 +67,8 @@ async function publishAnchors(): Promise<void> {
       await relay.publishAnchor(anchor);
     } catch (error) {
       // A head that is already there was published by an earlier attempt.
-      const published = await relay.headAt(anchor.company, anchor.sequence).catch(() => null);
-      if (published?.head !== anchor.head) {
+      const published = await publishedHead(anchor.company, anchor.sequence).catch(() => null);
+      if (published !== anchor.head) {
         throw error;
       }
     }

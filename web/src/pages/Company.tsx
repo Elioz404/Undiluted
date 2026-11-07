@@ -5,7 +5,7 @@ import { RoundTerms } from "../components/RoundTerms.tsx";
 import { Verify } from "../components/Verify.tsx";
 import { describe, dollars, percent, toMicros } from "../lib/format.ts";
 import { companyKey, joinRequests, payments, type JoinRequest } from "../lib/keys.ts";
-import { enclaveIdentity, Session } from "../lib/protocol.ts";
+import { Session } from "../lib/protocol.ts";
 import { relay } from "../lib/relay.ts";
 import type { Line, Mandate, Proposal, Response } from "../lib/types.ts";
 
@@ -420,8 +420,7 @@ function SellCompany({
     await run("Paying everyone out", async () => {
       const plan = await send({ kind: "get_payout_plan" });
       if (plan.kind !== "payout_plan") throw new Error("approve a sale first");
-      const enclave = await enclaveIdentity();
-      await relay.openPayouts(company, enclave.signing_key, plan.proceeds_micros);
+      await relay.openPayouts(company, plan.proceeds_micros);
       const lines: string[] = [];
       for (const instruction of plan.instructions) {
         await relay.payOut(company, instruction);
