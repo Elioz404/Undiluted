@@ -3,6 +3,7 @@
 
 pub mod anchors;
 pub mod client;
+pub mod enclave_check;
 pub mod error;
 pub mod local;
 pub mod near_cli;
@@ -15,6 +16,7 @@ mod wire_codec;
 
 pub use anchors::{AnchorRegistry, LocalAnchors, NearAnchors, NearAnchorsConfig};
 pub use client::Client;
+pub use enclave_check::{CheckedEnclave, EnclaveCheckConfig, check_enclave};
 pub use error::ClientError;
 pub use local::{LOCAL_TOKEN, LOCAL_TREASURY, LocalTransport};
 pub use near_cli::NearCli;

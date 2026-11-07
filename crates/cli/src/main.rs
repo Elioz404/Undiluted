@@ -7,9 +7,10 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use demo::{Destinations, Environment};
 use undiluted_client::{
-    ClientError, LOCAL_TOKEN, LOCAL_TREASURY, LocalAnchors, LocalPayouts, LocalRail,
-    LocalTransport, NearAnchors, NearAnchorsConfig, NearCli, NearPayouts, NearPayoutsConfig,
-    OneClickConfig, OneClickRail, OutLayerConfig, OutLayerTransport, RetryPolicy,
+    ClientError, EnclaveCheckConfig, LOCAL_TOKEN, LOCAL_TREASURY, LocalAnchors, LocalPayouts,
+    LocalRail, LocalTransport, NearAnchors, NearAnchorsConfig, NearCli, NearPayouts,
+    NearPayoutsConfig, OneClickConfig, OneClickRail, OutLayerConfig, OutLayerTransport,
+    RetryPolicy, check_enclave,
 };
 use undiluted_ledger::Treasury;
 
@@ -27,6 +28,31 @@ enum Commands {
         #[command(subcommand)]
         target: Target,
     },
+    /// Check from public sources that an enclave run happened in an attested
+    /// Intel TDX enclave, running the expected wasm, and see the keys it holds.
+    VerifyEnclave(Box<EnclaveCheck>),
+}
+
+#[derive(Args)]
+struct EnclaveCheck {
+    /// A transaction that ran the enclave's `identity` operation.
+    #[arg(long)]
+    transaction: String,
+    /// The account that sent it.
+    #[arg(long)]
+    sender: String,
+    /// The sha256 of the wasm that should have run, e.g. from building it yourself.
+    #[arg(long)]
+    wasm_hash: String,
+    #[arg(long)]
+    rpc_url: String,
+    /// `OutLayer`'s API, which serves each run's attestation.
+    #[arg(long)]
+    attestation_api: String,
+    /// `OutLayer`'s register contract, holding Intel's collateral and the
+    /// measurements of approved worker images.
+    #[arg(long)]
+    register_contract: String,
 }
 
 #[derive(Subcommand)]
@@ -222,11 +248,58 @@ fn run_local() -> Result<(), ClientError> {
     })
 }
 
+fn verify_enclave(check: &EnclaveCheck) -> Result<(), ClientError> {
+    let checked = check_enclave(
+        &EnclaveCheckConfig {
+            rpc_url: check.rpc_url.clone(),
+            attestation_api: check.attestation_api.clone(),
+            register_contract: check.register_contract.clone(),
+        },
+        &check.transaction,
+        &check.sender,
+        &check.wasm_hash,
+    )?;
+    let verified = &checked.verified;
+    println!(
+        "The run's TDX quote is signed by Intel; platform status {}",
+        verified.tcb_status
+    );
+    println!("Its measurements are a set OutLayer approved on chain:");
+    for (name, value) in [
+        ("mrtd", &verified.measurements.mrtd),
+        ("rtmr0", &verified.measurements.rtmr0),
+        ("rtmr1", &verified.measurements.rtmr1),
+        ("rtmr2", &verified.measurements.rtmr2),
+        ("rtmr3", &verified.measurements.rtmr3),
+    ] {
+        println!("  {name:<5} {value}");
+    }
+    println!(
+        "The quote commits to this run of wasm {}",
+        verified.wasm_hash
+    );
+    println!(
+        "and to its output, sha256 {}, which is the enclave's identity:",
+        verified.output_hash
+    );
+    println!(
+        "  signing key    {}",
+        hex::encode(checked.identity.signing_key.as_bytes())
+    );
+    println!(
+        "  encryption key {} (signed by the signing key)",
+        hex::encode(checked.identity.encryption_key)
+    );
+    Ok(())
+}
+
 fn main() -> ExitCode {
-    let Commands::Demo { target } = Cli::parse().command;
-    let result = match target {
-        Target::Local => run_local(),
-        Target::Deployed(deployment) => run_deployed(*deployment),
+    let result = match Cli::parse().command {
+        Commands::Demo { target } => match target {
+            Target::Local => run_local(),
+            Target::Deployed(deployment) => run_deployed(*deployment),
+        },
+        Commands::VerifyEnclave(check) => verify_enclave(&check),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

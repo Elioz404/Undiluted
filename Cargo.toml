@@ -5,6 +5,7 @@ members = [
     "crates/ledger",
     "crates/envelope",
     "crates/service",
+    "crates/attestation",
     "crates/client",
     "crates/cli",
     "crates/web",
@@ -17,6 +18,7 @@ default-members = [
     "crates/ledger",
     "crates/envelope",
     "crates/service",
+    "crates/attestation",
     "crates/client",
     "crates/cli",
     "crates/web",
@@ -47,6 +49,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 ureq = { version = "2", features = ["json"] }
+undiluted-attestation = { path = "crates/attestation" }
 undiluted-client = { path = "crates/client" }
 undiluted-domain = { path = "crates/domain" }
 undiluted-envelope = { path = "crates/envelope" }

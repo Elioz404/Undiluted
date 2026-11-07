@@ -26,6 +26,8 @@ pub enum ClientError {
     MismatchedReply,
     #[error("no randomness available: {0}")]
     Randomness(String),
+    #[error("the enclave's attestation does not check out: {0}")]
+    Attestation(String),
     #[error("data could not be encoded")]
     Encoding,
     #[error(transparent)]

@@ -1,0 +1,18 @@
+[package]
+name = "undiluted-attestation"
+description = "Checks that an OutLayer run of a given wasm happened in an attested Intel TDX enclave"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+dcap-qvl = { version = "0.7.1", default-features = false, features = ["std", "rustcrypto", "default-x509"] }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
