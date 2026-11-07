@@ -5,9 +5,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use demo::{Destinations, Environment};
 use undiluted_client::{
-    ClientError, LocalAnchors, LocalRail, LocalTransport, NearAnchors, NearAnchorsConfig, NearCli,
-    OneClickConfig, OneClickRail, OutLayerConfig, OutLayerTransport,
+    ClientError, LocalAnchors, LocalPayouts, LocalRail, LocalTransport, NearAnchors,
+    NearAnchorsConfig, NearCli, NearPayouts, NearPayoutsConfig, OneClickConfig, OneClickRail,
+    OutLayerConfig, OutLayerTransport,
 };
 
 #[derive(Parser)]
@@ -83,6 +85,25 @@ struct Deployment {
     /// Registers the deposit address with the token contract.
     #[arg(long, default_value = "0.00125 NEAR")]
     token_storage_deposit: String,
+    /// The account running the distribution contract.
+    #[arg(long)]
+    distribution_contract: String,
+    /// Where each holder gets paid at exit.
+    #[arg(long)]
+    founder_account: String,
+    #[arg(long)]
+    ana_account: String,
+    #[arg(long)]
+    ben_account: String,
+    #[arg(long, default_value = "30 Tgas")]
+    distribution_gas: String,
+    #[arg(long, default_value = "60 Tgas")]
+    payout_gas: String,
+    #[arg(long, default_value = "100 Tgas")]
+    funding_gas: String,
+    /// Attached for contract storage. Whatever is not used comes back.
+    #[arg(long, default_value = "0.01 NEAR")]
+    distribution_deposit: String,
     /// Path to the near command-line tool.
     #[arg(long, default_value = "near")]
     near_cli: PathBuf,
@@ -112,7 +133,7 @@ fn run_deployed(deployment: Deployment) -> Result<(), ClientError> {
     let anchors = NearAnchors::new(NearAnchorsConfig {
         near: near.clone(),
         contract: deployment.anchor_contract,
-        rpc_url: deployment.rpc_url,
+        rpc_url: deployment.rpc_url.clone(),
         deposit: deployment.anchor_deposit,
         prepaid_gas: deployment.anchor_gas,
     });
@@ -122,6 +143,17 @@ fn run_deployed(deployment: Deployment) -> Result<(), ClientError> {
             std::env::var(&name).map_err(|_| ClientError::Payment(format!("{name} is not set")))
         })
         .transpose()?;
+    let payouts = NearPayouts::new(NearPayoutsConfig {
+        near: near.clone(),
+        contract: deployment.distribution_contract,
+        token: token_contract(&deployment.destination_asset)?,
+        rpc_url: deployment.rpc_url,
+        call_gas: deployment.distribution_gas,
+        pay_gas: deployment.payout_gas,
+        fund_gas: deployment.funding_gas,
+        storage_deposit: deployment.distribution_deposit,
+        token_storage_deposit: deployment.token_storage_deposit.clone(),
+    });
     let rail = OneClickRail::new(
         OneClickConfig {
             api_url: deployment.payment_api,
@@ -138,15 +170,44 @@ fn run_deployed(deployment: Deployment) -> Result<(), ClientError> {
         },
         near,
     );
-    demo::run(transport, anchors, rail)
+    demo::run(Environment {
+        transport,
+        anchors,
+        rail,
+        payouts,
+        destinations: Destinations {
+            founder: deployment.founder_account,
+            ana: deployment.ana_account,
+            ben: deployment.ben_account,
+        },
+    })
+}
+
+fn token_contract(asset: &str) -> Result<String, ClientError> {
+    asset
+        .strip_prefix("nep141:")
+        .map(str::to_owned)
+        .ok_or_else(|| ClientError::Payout(format!("not a NEAR token: {asset}")))
+}
+
+fn run_local() -> Result<(), ClientError> {
+    demo::run(Environment {
+        transport: LocalTransport::new()?,
+        anchors: LocalAnchors::default(),
+        rail: LocalRail::default(),
+        payouts: LocalPayouts::default(),
+        destinations: Destinations {
+            founder: "founder.local".to_owned(),
+            ana: "ana.local".to_owned(),
+            ben: "ben.local".to_owned(),
+        },
+    })
 }
 
 fn main() -> ExitCode {
     let Commands::Demo { target } = Cli::parse().command;
     let result = match target {
-        Target::Local => LocalTransport::new().and_then(|transport| {
-            demo::run(transport, LocalAnchors::default(), LocalRail::default())
-        }),
+        Target::Local => run_local(),
         Target::Deployed(deployment) => run_deployed(*deployment),
     };
     match result {

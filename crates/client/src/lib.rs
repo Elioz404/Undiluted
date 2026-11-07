@@ -9,6 +9,7 @@ pub mod near_cli;
 pub mod outlayer;
 pub mod party;
 pub mod payments;
+pub mod payouts;
 pub mod transport;
 mod wire_codec;
 
@@ -20,4 +21,5 @@ pub use near_cli::NearCli;
 pub use outlayer::{OutLayerConfig, OutLayerTransport};
 pub use party::Party;
 pub use payments::{LocalRail, OneClickConfig, OneClickRail, PaymentRail, Settlement};
+pub use payouts::{LocalPayouts, NearPayouts, NearPayoutsConfig, PayoutExecutor};
 pub use transport::{EnclaveIdentity, Exchange, Transport};

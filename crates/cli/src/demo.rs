@@ -2,12 +2,13 @@
 //! itself. Every party signs with its own key and sees only what it may see.
 
 use undiluted_client::{
-    AnchorRegistry, Client, ClientError, Party, PaymentRail, Settlement, Transport,
+    AnchorRegistry, Client, ClientError, Party, PaymentRail, PayoutExecutor, Settlement, Transport,
 };
 use undiluted_domain::{
-    CompanyId, HolderId, InstrumentId, MfnOffer, Money, Ownership, Ratio, Safe, SafeTerms, Shares,
+    CompanyId, HolderId, InstrumentId, MfnOffer, Money, Ownership, PayoutBasis, Ratio, Safe,
+    SafeTerms, Shares,
 };
-use undiluted_ledger::{Event, SettlementReference};
+use undiluted_ledger::{Event, PayoutDestination, SettlementReference};
 use undiluted_service::wire::AnchorOutput;
 use undiluted_service::{Actor, Command, Response, Statement};
 
@@ -19,6 +20,7 @@ const FOUNDER_SHARES: u128 = 8_000_000;
 const ANA_INVESTMENT: u128 = 10;
 const BEN_INVESTMENT: u128 = 20;
 const BEN_POST_MONEY_CAP: u128 = 200;
+const EXIT_PROCEEDS: u128 = 60;
 const FORGED_HEAD: [u8; 32] = [0xab; 32];
 const FORGED_SIGNATURE: [u8; 64] = [0xcd; 64];
 
@@ -41,10 +43,28 @@ impl Member {
     }
 }
 
-struct Demo<T, R, P> {
+/// What the scenario runs against: real services or in-memory ones.
+pub struct Environment<T, R, P, X> {
+    pub transport: T,
+    pub anchors: R,
+    pub rail: P,
+    pub payouts: X,
+    pub destinations: Destinations,
+}
+
+/// Where each holder wants to be paid at exit.
+pub struct Destinations {
+    pub founder: String,
+    pub ana: String,
+    pub ben: String,
+}
+
+struct Demo<T, R, P, X> {
     client: Client<T>,
     anchors: R,
     rail: P,
+    payouts: X,
+    destinations: Destinations,
     company_id: CompanyId,
     company: Party,
     founder: Member,
@@ -52,36 +72,38 @@ struct Demo<T, R, P> {
     ben: Member,
 }
 
-pub fn run<T: Transport, R: AnchorRegistry, P: PaymentRail>(
-    transport: T,
-    anchors: R,
-    rail: P,
+pub fn run<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor>(
+    environment: Environment<T, R, P, X>,
 ) -> Result<(), ClientError> {
-    let mut demo = Demo::connect(transport, anchors, rail)?;
+    let mut demo = Demo::connect(environment)?;
     demo.incorporate()?;
     demo.raise()?;
     let offer = demo.discover_better_terms()?;
     demo.exercise_mfn(offer)?;
     demo.check_privacy()?;
     demo.check_history()?;
+    demo.approve_exit()?;
+    demo.pay_out()?;
     println!("\nDone. Every reply was signed by the enclave and checked against its key.");
     Ok(())
 }
 
-impl<T: Transport, R: AnchorRegistry, P: PaymentRail> Demo<T, R, P> {
-    fn connect(transport: T, anchors: R, rail: P) -> Result<Self, ClientError> {
+impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T, R, P, X> {
+    fn connect(environment: Environment<T, R, P, X>) -> Result<Self, ClientError> {
         let company = Party::generate()?;
         let suffix = hex::encode(&company.public_key().as_bytes()[..4]);
         let company_id = CompanyId::new(format!("demo-{suffix}"))?;
-        let client = Client::connect(transport, company_id.clone(), MAX_ATTEMPTS)?;
+        let client = Client::connect(environment.transport, company_id.clone(), MAX_ATTEMPTS)?;
         println!(
             "Connected to the enclave. Signing key: {}",
             hex::encode(client.identity().signing_key.as_bytes())
         );
         Ok(Self {
             client,
-            anchors,
-            rail,
+            anchors: environment.anchors,
+            rail: environment.rail,
+            payouts: environment.payouts,
+            destinations: environment.destinations,
             company_id,
             company,
             founder: Member::new("founder")?,
@@ -255,6 +277,99 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail> Demo<T, R, P> {
         Ok(())
     }
 
+    fn approve_exit(&mut self) -> Result<(), ClientError> {
+        step("Each holder privately chooses where to be paid");
+        let holders = [
+            (
+                self.founder.party.clone(),
+                self.founder.id.clone(),
+                self.destinations.founder.clone(),
+            ),
+            (
+                self.ana.party.clone(),
+                self.ana.id.clone(),
+                self.destinations.ana.clone(),
+            ),
+            (
+                self.ben.party.clone(),
+                self.ben.id.clone(),
+                self.destinations.ben.clone(),
+            ),
+        ];
+        for (party, id, destination) in holders {
+            let actor = Actor::Holder(id.clone());
+            let event = Event::PayoutDestinationSet {
+                holder: id,
+                destination: PayoutDestination::new(destination)?,
+            };
+            let response =
+                self.client
+                    .commit((&party, actor.clone()), event, &[(&party, actor)])?;
+            expect(matches!(response, Response::Committed { .. }), &response)?;
+            self.publish_anchors()?;
+        }
+
+        step("The company is sold for $60. The board signs once, and that is the last human step");
+        let company = self.company.clone();
+        let event = Event::ExitApproved {
+            proceeds: usd(EXIT_PROCEEDS),
+        };
+        let response = self.client.commit(
+            (&company, Actor::Company),
+            event,
+            &[(&company, Actor::Company)],
+        )?;
+        expect(matches!(response, Response::Committed { .. }), &response)?;
+        self.publish_anchors()
+    }
+
+    fn pay_out(&mut self) -> Result<(), ClientError> {
+        step("The proceeds go into a contract that pays only what the enclave signed");
+        let enclave_key = self.client.identity().signing_key;
+        self.payouts
+            .open(&self.company_id, &enclave_key, usd(EXIT_PROCEEDS))?;
+        self.payouts.fund(&self.company_id, usd(EXIT_PROCEEDS))?;
+
+        step("Each payment is relayed without anyone deciding anything");
+        let plan = self
+            .client
+            .send(&self.company, Actor::Company, Command::GetPayoutPlan)?;
+        let Response::PayoutPlan(plan) = plan else {
+            return Err(ClientError::Protocol(format!("expected a plan: {plan:?}")));
+        };
+        for instruction in &plan.instructions {
+            self.payouts.pay(&self.company_id, instruction)?;
+            println!(
+                "  Paid {:.2} to {}",
+                as_dollars(instruction.amount),
+                instruction.recipient
+            );
+        }
+
+        step("A payment altered by whoever relays it is refused");
+        let mut altered = plan
+            .instructions
+            .first()
+            .ok_or_else(|| ClientError::Protocol("the plan is empty".to_owned()))?
+            .clone();
+        altered.index =
+            u32::try_from(plan.instructions.len()).map_err(|_| ClientError::Encoding)?;
+        match self.payouts.pay(&self.company_id, &altered) {
+            Err(ClientError::Payout(_)) => println!("  Refused by the contract."),
+            other => {
+                return Err(ClientError::Protocol(format!(
+                    "the altered payment was not refused: {other:?}"
+                )));
+            }
+        }
+
+        step("Each investor sees only their own payout, and that the total adds up");
+        let (ana, ben) = (self.ana.actor(), self.ben.actor());
+        print_payout("Ana", &self.client.statement(&self.ana.party, ana)?);
+        print_payout("Ben", &self.client.statement(&self.ben.party, ben)?);
+        Ok(())
+    }
+
     fn commit(&mut self, event: Event, holder: &Party, actor: Actor) -> Result<(), ClientError> {
         let company = self.company.clone();
         let response = self.client.commit(
@@ -367,6 +482,25 @@ fn print_statement(name: &str, statement: &Statement) {
             |cap| format!("${}", cap.value() / MICROS_PER_DOLLAR),
         );
         println!("    MFN offer on {}: cap {cap}", offer.target);
+    }
+}
+
+fn print_payout(name: &str, statement: &Statement) {
+    let Some(exit) = &statement.exit else {
+        println!("  {name}: no exit recorded");
+        return;
+    };
+    for payout in &exit.payouts {
+        let basis = match payout.basis {
+            PayoutBasis::Preference => "took their money back",
+            PayoutBasis::AsConverted => "converted",
+        };
+        println!(
+            "  {name}: {:.2} of {:.2} ({basis}). Total adds up: {}",
+            as_dollars(payout.amount),
+            as_dollars(exit.proceeds),
+            exit.total_matches_proceeds
+        );
     }
 }
 

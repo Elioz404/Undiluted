@@ -14,6 +14,8 @@ pub enum ClientError {
     Enclave(String),
     #[error("the anchor registry refused: {0}")]
     Anchor(String),
+    #[error("the exit payout failed: {0}")]
+    Payout(String),
     #[error("the payment failed: {0}")]
     Payment(String),
     #[error("the reply is not signed by the enclave")]

@@ -27,6 +27,10 @@ commitment to its history.
   enclave's signature, only in order, and never replaces one. Anyone can relay it,
   but nobody can forge it, and investors can compare the head in their statement
   with the published one.
+- **Exits pay out on their own.** The board approves a sale once. The enclave works
+  out each payout and signs it; a contract holds the funds and pays only what is
+  signed, each payment once, never more than was deposited. Anyone can relay a
+  payment, and nobody can change its recipient or amount.
 - **Investments settle through NEAR Intents.** An investor pays through the 1Click
   API and the SAFE records what the treasury actually received.
 
@@ -45,6 +49,7 @@ result on any machine.
 | `crates/cli` | The runnable demo | `client` |
 | `crates/enclave` | Connects OutLayer's sealed storage and TEE keys to the service | `service` |
 | `contracts/anchor` | Append-only registry of heads on NEAR | `near-sdk` |
+| `contracts/distribution` | Holds exit proceeds and pays what the enclave signed | `near-sdk` |
 
 `crates/enclave` targets `wasm32-wasip2` only, so it is outside the Cargo workspace.
 
@@ -63,7 +68,8 @@ cargo run -p undiluted-cli -- demo local
 
 You will see an MFN holder get offered better terms without learning who received
 them, exercise the clause alone, another investor be refused the full table, and an
-impostor be refused.
+impostor be refused. Then the company is sold: the board
+signs once, the payouts go out, and each investor sees only their own.
 
 Run the tests:
 
@@ -86,7 +92,8 @@ Do this, and see this:
 | `cargo test -p undiluted-envelope` | Only the enclave opens a request, only the sender opens the reply, and tampering is detected |
 | `cargo test -p undiluted-service` | Who may do what, and that a retried request does not act twice |
 | `cargo test -p undiluted-client` | Answers lost on the way back do not apply anything twice |
-| `cargo test -p undiluted-anchor` | A recorded head cannot be overwritten, skipped or written by anyone but the authority |
+| `cargo test -p undiluted-anchor` | A head needs the enclave's signature and cannot be overwritten or skipped |
+| `cargo test -p undiluted-distribution` | A relay cannot change a payout, repeat one, or pay more than was deposited |
 
 ## Deploying the enclave
 
@@ -102,10 +109,11 @@ sees it:
 outlayer secrets set --generate PROTECTED_ENCLAVE_KEY:hex32 --project OWNER/PROJECT
 ```
 
-Build and deploy the anchor contract, for example to `anchor.OWNER`:
+Build the contracts and deploy them, for example to `anchor.OWNER` and
+`distribution.OWNER`, calling `new` on each:
 
 ```bash
-RUSTFLAGS='-C target-cpu=mvp -C link-arg=-s' cargo build -p undiluted-anchor --target wasm32-unknown-unknown --release
+RUSTFLAGS='-C target-cpu=mvp -C link-arg=-s' cargo build -p undiluted-anchor -p undiluted-distribution --target wasm32-unknown-unknown --release
 ```
 
 Then run the same demo against both, with test payments through
@@ -117,7 +125,7 @@ curl -X POST https://www.usetidepool.tech/v0/faucet -H 'content-type: applicatio
 ```
 
 ```bash
-cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-account OWNER --anchor-contract anchor.OWNER --signer OWNER --treasury TREASURY --payment-api https://www.usetidepool.tech --origin-asset nep141:usdt.tidepool-sandbox.testnet --destination-asset nep141:usdc.tidepool-sandbox.testnet
+cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-account OWNER --anchor-contract anchor.OWNER --signer OWNER --treasury TREASURY --payment-api https://www.usetidepool.tech --origin-asset nep141:usdt.tidepool-sandbox.testnet --destination-asset nep141:usdc.tidepool-sandbox.testnet --distribution-contract distribution.OWNER --founder-account FOUNDER --ana-account ANA --ben-account BEN
 ```
 
 ## Rules and their limits
@@ -133,6 +141,9 @@ cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-ac
 - Anchors reveal a company identifier and how many events it has recorded.
 - Test payments run on Tidepool, a third-party sandbox that is not affiliated with
   NEAR and whose test tokens have no value. NEAR Intents has no official testnet.
+- Exit payouts go directly to NEAR accounts, so their recipients and amounts are
+  public on chain. Each investor's view in the product stays private; the chain does
+  not hide the final transfers.
 - Payments in the demo start from a NEAR account. The enclave records the settlement
   reference the parties sign; it does not check the payment on chain.
 - A settlement does not hide amounts: deposits on the paying chain stay visible. What
