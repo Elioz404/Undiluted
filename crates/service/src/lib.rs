@@ -16,7 +16,7 @@ pub use gateway::{Gateway, GatewayOutput};
 pub use memory::MemoryStore;
 pub use ports::{EnclaveSigner, Store, StoreError};
 pub use protocol::{
-    Actor, Command, CompanyView, HeadAttestation, ProposalView, Reply, RequestId, Response,
-    SignedRequest, Statement,
+    Actor, Command, CompanyView, HeadAttestation, HolderExit, PayoutInstruction, PayoutPlan,
+    ProposalView, Reply, RequestId, Response, SignedRequest, Statement,
 };
 pub use service::Service;

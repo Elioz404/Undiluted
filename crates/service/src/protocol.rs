@@ -1,7 +1,7 @@
 //! Messages exchanged with the enclave, independent of how they travel.
 
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
-use undiluted_domain::{CompanyId, HolderId, MfnOffer, ProForma};
+use undiluted_domain::{CompanyId, HolderId, MfnOffer, Money, Payout, ProForma};
 use undiluted_ledger::{Digest, Event, PublicKey, SignatureBytes};
 
 use crate::error::ServiceError;
@@ -9,6 +9,7 @@ use crate::error::ServiceError;
 const REQUEST_TAG: &str = "undiluted/service/request/v1";
 const REPLY_TAG: &str = "undiluted/service/reply/v1";
 const ANCHOR_TAG: &str = "undiluted/service/anchor/v1";
+const PAYOUT_TAG: &str = "undiluted/service/payout/v1";
 
 pub type RequestId = [u8; 16];
 
@@ -34,6 +35,7 @@ pub enum Command {
     GetProposal,
     GetCapTable,
     GetStatement,
+    GetPayoutPlan,
 }
 
 impl Command {
@@ -105,6 +107,45 @@ pub struct Statement {
     pub reconciles: bool,
     pub lines: Vec<undiluted_domain::OwnershipLine>,
     pub mfn_offers: Vec<MfnOffer>,
+    pub exit: Option<HolderExit>,
+}
+
+/// A holder's share of an approved exit, without anyone else's.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct HolderExit {
+    pub proceeds: Money,
+    /// Whether all payouts together add up to exactly the proceeds.
+    pub total_matches_proceeds: bool,
+    pub payouts: Vec<Payout>,
+}
+
+/// One payment the distribution contract may make, signed by the enclave.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct PayoutInstruction {
+    pub index: u32,
+    pub recipient: String,
+    pub amount: Money,
+    pub signature: SignatureBytes,
+}
+
+impl PayoutInstruction {
+    pub fn signing_digest(
+        company: &CompanyId,
+        index: u32,
+        recipient: &str,
+        amount: Money,
+    ) -> Result<Digest, ServiceError> {
+        let payload =
+            to_vec(&(company, index, recipient, amount)).map_err(|_| ServiceError::Encoding)?;
+        Ok(Digest::tagged(PAYOUT_TAG, &payload))
+    }
+}
+
+/// Every payment of an exit, for the company to relay.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct PayoutPlan {
+    pub proceeds: Money,
+    pub instructions: Vec<PayoutInstruction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -121,6 +162,7 @@ pub enum Response {
     Cancelled,
     CapTable(CompanyView),
     Statement(Statement),
+    PayoutPlan(PayoutPlan),
     Rejected {
         reason: String,
     },

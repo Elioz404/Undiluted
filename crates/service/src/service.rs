@@ -1,5 +1,5 @@
 use borsh::{BorshDeserialize, BorshSerialize, from_slice, to_vec};
-use undiluted_domain::{CompanyId, HolderId};
+use undiluted_domain::{CompanyId, HolderId, Money};
 use undiluted_ledger::{
     Digest, Draft, Entry, Event, HolderSignature, Ledger, LedgerConfig, PublicKey, SignatureBytes,
 };
@@ -7,8 +7,8 @@ use undiluted_ledger::{
 use crate::error::ServiceError;
 use crate::ports::{EnclaveSigner, Store};
 use crate::protocol::{
-    Actor, Command, CompanyView, HeadAttestation, ProposalView, Reply, Response, SignedRequest,
-    Statement,
+    Actor, Command, CompanyView, HeadAttestation, HolderExit, PayoutInstruction, PayoutPlan,
+    ProposalView, Reply, Response, SignedRequest, Statement,
 };
 
 /// An event collecting signatures. Only one can be open per company because
@@ -114,6 +114,7 @@ impl<S: Store, K: EnclaveSigner> Service<S, K> {
             }
             Command::GetCapTable => Self::read_table(request, &ledger).map(|r| (r, None)),
             Command::GetStatement => Self::read_statement(request, &ledger).map(|r| (r, None)),
+            Command::GetPayoutPlan => self.payout_plan(request, &ledger).map(|r| (r, None)),
         }
     }
 
@@ -196,13 +197,16 @@ impl<S: Store, K: EnclaveSigner> Service<S, K> {
         Ok(Response::Proposal(view))
     }
 
-    /// The company proposes anything; a holder only an MFN election of their own.
+    /// The company proposes anything; a holder only what is theirs alone to
+    /// decide: an MFN election or where they get paid.
     fn ensure_may_propose(actor: &Actor, draft: &Draft) -> Result<(), ServiceError> {
         match actor {
             Actor::Company => Ok(()),
             Actor::Holder(holder)
-                if matches!(draft.event, Event::MfnElected { .. })
-                    && draft.required_holders.contains(holder) =>
+                if matches!(
+                    draft.event,
+                    Event::MfnElected { .. } | Event::PayoutDestinationSet { .. }
+                ) && draft.required_holders.contains(holder) =>
             {
                 Ok(())
             }
@@ -333,6 +337,68 @@ impl<S: Store, K: EnclaveSigner> Service<S, K> {
             reconciles: pro_forma.reconciles()?,
             lines: pro_forma.lines_of(holder).cloned().collect(),
             mfn_offers: ledger.table().mfn_offers(holder),
+            exit: Self::holder_exit(ledger, holder)?,
+        }))
+    }
+
+    fn holder_exit(ledger: &Ledger, holder: &HolderId) -> Result<Option<HolderExit>, ServiceError> {
+        let (Some(proceeds), Some(payouts)) = (ledger.exit_proceeds(), ledger.exit_payouts()?)
+        else {
+            return Ok(None);
+        };
+        let total = payouts
+            .iter()
+            .try_fold(Money::ZERO, |sum, payout| sum.checked_add(payout.amount))?;
+        Ok(Some(HolderExit {
+            proceeds,
+            total_matches_proceeds: total == proceeds,
+            payouts: payouts
+                .into_iter()
+                .filter(|payout| &payout.holder == holder)
+                .collect(),
+        }))
+    }
+
+    /// Signs each payment separately, so whoever relays one can neither change
+    /// its amount or recipient nor learn the others from it.
+    fn payout_plan(
+        &self,
+        request: &SignedRequest,
+        ledger: &Ledger,
+    ) -> Result<Response, ServiceError> {
+        if request.actor != Actor::Company {
+            return Err(ServiceError::Forbidden);
+        }
+        let (Some(proceeds), Some(payouts)) = (ledger.exit_proceeds(), ledger.exit_payouts()?)
+        else {
+            return Err(ServiceError::NoExit);
+        };
+
+        let mut instructions = Vec::new();
+        for payout in payouts.iter().filter(|payout| !payout.amount.is_zero()) {
+            let index =
+                u32::try_from(instructions.len()).map_err(|_| ServiceError::TooManyPayouts)?;
+            let recipient = ledger
+                .payout_destination(&payout.holder)
+                .ok_or(ServiceError::NoDestination)?
+                .as_str()
+                .to_owned();
+            let digest = PayoutInstruction::signing_digest(
+                &request.company,
+                index,
+                &recipient,
+                payout.amount,
+            )?;
+            instructions.push(PayoutInstruction {
+                index,
+                recipient,
+                amount: payout.amount,
+                signature: self.signer.sign(digest.as_bytes())?,
+            });
+        }
+        Ok(Response::PayoutPlan(PayoutPlan {
+            proceeds,
+            instructions,
         }))
     }
 

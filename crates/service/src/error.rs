@@ -30,6 +30,12 @@ pub enum ServiceError {
     WrongProposal,
     #[error("another run changed this company; retry")]
     Conflict,
+    #[error("no exit has been approved")]
+    NoExit,
+    #[error("a payout has no destination")]
+    NoDestination,
+    #[error("too many payouts")]
+    TooManyPayouts,
     #[error("stored data could not be read")]
     CorruptData,
     #[error("data could not be encoded")]

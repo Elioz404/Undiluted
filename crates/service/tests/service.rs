@@ -4,9 +4,12 @@ use ed25519_dalek::{Signer, SigningKey};
 use undiluted_domain::{
     CompanyId, HolderId, InstrumentId, Money, Ownership, Ratio, Safe, SafeTerms, Shares,
 };
-use undiluted_ledger::{Digest, Event, PublicKey, SettlementReference, SignatureBytes};
+use undiluted_ledger::{
+    Digest, Event, PayoutDestination, PublicKey, SettlementReference, SignatureBytes,
+};
 use undiluted_service::{
-    Actor, Command, EnclaveSigner, MemoryStore, Reply, Response, Service, SignedRequest, StoreError,
+    Actor, Command, EnclaveSigner, MemoryStore, PayoutInstruction, Reply, Response, Service,
+    SignedRequest, StoreError,
 };
 
 const COMPANY_SEED: u8 = 1;
@@ -470,4 +473,134 @@ fn an_unknown_company_is_refused() {
     harness.company = CompanyId::new("ghost").unwrap();
     let reply = harness.send(COMPANY_SEED, Actor::Company, Command::GetCapTable);
     assert_eq!(rejected(&reply), "this company does not exist");
+}
+
+fn holder_sets_destination(harness: &mut Harness, name: &str, seed: u8) {
+    let actor = Actor::Holder(holder(name));
+    let event = Event::PayoutDestinationSet {
+        holder: holder(name),
+        destination: PayoutDestination::new(format!("{name}.near")).unwrap(),
+    };
+    let digest = match harness
+        .send(seed, actor.clone(), Command::Propose { event })
+        .response
+    {
+        Response::Proposal(view) => view.digest,
+        other => panic!("expected a proposal, got {other:?}"),
+    };
+    let reply = harness.send(
+        seed,
+        actor,
+        Command::Sign {
+            digest,
+            signature: sign_digest(seed, &digest),
+        },
+    );
+    assert!(
+        matches!(reply.response, Response::Committed { .. }),
+        "{reply:?}"
+    );
+}
+
+fn exited() -> Harness {
+    let mut harness = seeded();
+    holder_sets_destination(&mut harness, "ana", ANA_SEED);
+    holder_sets_destination(&mut harness, "ben", BEN_SEED);
+    let digest = harness.propose(Event::ExitApproved {
+        proceeds: usd(50_000_000),
+    });
+    let reply = harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::Sign {
+            digest,
+            signature: sign_digest(COMPANY_SEED, &digest),
+        },
+    );
+    assert!(
+        matches!(reply.response, Response::Committed { .. }),
+        "{reply:?}"
+    );
+    harness
+}
+
+#[test]
+fn a_holder_cannot_choose_where_someone_else_gets_paid() {
+    let mut harness = seeded();
+    let event = Event::PayoutDestinationSet {
+        holder: holder("ana"),
+        destination: PayoutDestination::new("ben.near").unwrap(),
+    };
+    let reply = harness.send(
+        BEN_SEED,
+        Actor::Holder(holder("ben")),
+        Command::Propose { event },
+    );
+    assert_eq!(rejected(&reply), "this actor may not do that");
+}
+
+#[test]
+fn payout_instructions_are_signed_and_add_up_to_the_proceeds() {
+    let mut harness = exited();
+    let enclave = PublicKey::from_bytes(key(42).verifying_key().to_bytes());
+
+    let reply = harness.send(COMPANY_SEED, Actor::Company, Command::GetPayoutPlan);
+    let Response::PayoutPlan(plan) = reply.response else {
+        panic!("expected a plan");
+    };
+
+    let total: u128 = plan.instructions.iter().map(|i| i.amount.value()).sum();
+    assert_eq!(total, usd(50_000_000).value());
+    for instruction in &plan.instructions {
+        let digest = PayoutInstruction::signing_digest(
+            &harness.company,
+            instruction.index,
+            &instruction.recipient,
+            instruction.amount,
+        )
+        .unwrap();
+        assert!(enclave.verifies(&digest, &instruction.signature));
+    }
+    assert_eq!(plan.instructions[0].index, 0);
+    assert_eq!(plan.instructions[0].recipient, "ana.near");
+}
+
+#[test]
+fn only_the_company_gets_the_full_payout_plan() {
+    let mut harness = exited();
+    let reply = harness.send(
+        BEN_SEED,
+        Actor::Holder(holder("ben")),
+        Command::GetPayoutPlan,
+    );
+    assert_eq!(rejected(&reply), "this actor may not do that");
+}
+
+#[test]
+fn a_plan_needs_an_approved_exit() {
+    let mut harness = seeded();
+    let reply = harness.send(COMPANY_SEED, Actor::Company, Command::GetPayoutPlan);
+    assert_eq!(rejected(&reply), "no exit has been approved");
+}
+
+#[test]
+fn a_holder_sees_only_their_own_payout_and_that_the_total_matches() {
+    let mut harness = exited();
+
+    let exit = harness.statement("ben", BEN_SEED).exit.unwrap();
+
+    assert!(exit.total_matches_proceeds);
+    assert_eq!(exit.payouts.len(), 1);
+    assert_eq!(exit.payouts[0].holder, holder("ben"));
+}
+
+#[test]
+fn nothing_can_be_issued_after_an_exit() {
+    let mut harness = exited();
+    let event = safe("late", "ben", 1, Some(10), false);
+    let reply = harness.send(COMPANY_SEED, Actor::Company, Command::Propose { event });
+    assert_eq!(
+        rejected(&reply),
+        "this company has already approved an exit"
+    );
 }
