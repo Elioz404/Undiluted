@@ -100,8 +100,11 @@ compiled to WebAssembly. A small relay forwards ciphertext to the enclave and
 pays for transactions; it never sees a key or a position, and it cannot stand in
 for the enclave:
 
-- The site pins the enclave's signing key at build time, and that key signs the
-  enclave's encryption key, so a relay cannot hand out a key of its own.
+- The site pins the enclave's signing key and wasm hash at build time, from the
+  public settings in `web/.env.production`. That key signs the enclave's
+  encryption key, so a relay cannot hand out a key of its own.
+- **Verify the enclave** checks, in the browser, the Intel TDX attestation of the
+  run that produced those keys. See [Verify the enclave yourself](#verify-the-enclave-yourself).
 - **Check against NEAR** reads the head, and the enclave key the company
   registered, from NEAR's RPC directly, not through the relay.
 - The relay pays for everything from its own test funds, so it rate limits each
@@ -114,7 +117,7 @@ testnet account for the relay:
 ```bash
 cargo install wasm-bindgen-cli --version 0.2.130 --locked
 cd web && npm ci && sh scripts/build-wasm.sh
-cp .env.example .env.local   # set RELAY_ACCOUNT, RELAY_PRIVATE_KEY, VITE_ENCLAVE_SIGNING_KEY
+cp .env.example .env.local   # set RELAY_ACCOUNT and RELAY_PRIVATE_KEY
 npm run dev
 ```
 
@@ -142,12 +145,64 @@ a round that Ben joins alone while someone else's claim on his payment is
 refused, sells the company, and pays everyone out through the distribution
 contract, where a forged payout is refused before the relay spends anything.
 
+## Verify the enclave yourself
+
+The claim that matters most is that the table lives in a genuine TEE running this
+code. Every OutLayer run is attested: Intel signs a TDX quote whose report data
+commits to the run's wasm hash, input and output. The check takes four steps, all
+in `crates/attestation`, on public evidence only:
+
+1. The quote is signed by Intel's attestation chain and the platform is up to
+   date, checked with [dcap-qvl](https://github.com/Phala-Network/dcap-qvl)
+   against the Intel collateral OutLayer keeps on NEAR.
+2. The quote's five measurements (MRTD, RTMR0-3) are a worker image OutLayer
+   approved on NEAR, in its register contract.
+3. The quote's report data is the hash of the run's details, so none can be swapped.
+4. Those details name this repository's enclave wasm, and their output hash is the
+   hash of the output NEAR recorded: the enclave's identity, with the signing key
+   the site pins.
+
+From the command line:
+
+```bash
+cargo run -p undiluted-cli -- verify-enclave --transaction 8V4dn4gEfMvitRvFQaXtQAmJKXo6izN4gsk31z3uYzBL --sender undiluted-dev.testnet --wasm-hash c3b8b92a101e575d1c0e2e502c1fc21443fa0e08e864e84fe467d5840bda9f77 --rpc-url https://rpc.testnet.fastnear.com --attestation-api https://testnet-api.outlayer.ai --register-contract worker.outlayer.testnet
+```
+
+It prints the platform status, the approved measurements, the wasm and the keys.
+In the web app, **Verify the enclave** on the first page runs the same Rust code,
+compiled to WebAssembly, and shows **Genuine enclave** when every step holds.
+`cargo test -p undiluted-attestation` runs it against a recorded testnet
+attestation, and shows that another wasm, an altered output, a swapped detail, an
+unapproved image or a tampered quote are each refused.
+
+To check that the wasm hash is this code, build it and compare:
+
+```bash
+docker run --rm -v "$PWD:/work" -w /work/crates/enclave rust:1.99.1 sh -c "cargo build --release --target wasm32-wasip2 --target-dir /tmp/build && sha256sum /tmp/build/wasm32-wasip2/release/undiluted-enclave.wasm"
+```
+
+### The page itself
+
+A web page is only as trustworthy as whoever serves it. So the site is built by
+GitHub Actions from this repository (`.github/workflows/pages.yml`) and published
+on GitHub Pages, apart from whoever runs the relay, and the build is attested:
+
+```bash
+gh attestation verify index.html --repo Elioz404/Undiluted
+```
+
+run on a file downloaded from the published site, shows the workflow and commit it
+came from. Everything the page trusts is in `web/.env.production`, and its content
+security policy allows scripts only from the site itself.
+
 ## Deployed on NEAR testnet
 
 | What | Where |
 | --- | --- |
 | Enclave (OutLayer project, Intel TDX) | `undiluted-dev.testnet/undiluted`, wasm sha256 `c3b8b92a101e575d1c0e2e502c1fc21443fa0e08e864e84fe467d5840bda9f77` |
 | Enclave signing key (pinned by the site) | `4385ac1675dfd32bf15f994b0bd1effead92649d12ad7422b7ab003ef97f6ab4` |
+| An attested `identity` run | [`8V4dn4gEfMvitRvFQaXtQAmJKXo6izN4gsk31z3uYzBL`](https://testnet.nearblocks.io/txns/8V4dn4gEfMvitRvFQaXtQAmJKXo6izN4gsk31z3uYzBL) |
+| OutLayer register contract (collateral, approved images) | `worker.outlayer.testnet` |
 | Anchor contract | [`anchor.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/anchor.undiluted-dev.testnet) |
 | Distribution contract | [`distribution.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/distribution.undiluted-dev.testnet) |
 | Treasury | [`treasury.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/treasury.undiluted-dev.testnet) |
@@ -266,8 +321,9 @@ and its relay also ship as one container image: `docker build -t undiluted .`
   company console and an investor view opened in the same browser could read
   each other's keys. Real holders each use their own browser. The page's content
   security policy allows scripts only from the site itself.
-- The browser trusts the site it loaded. Whoever serves the page could serve
-  different code, as with any web app; running the site locally removes that.
+- The browser trusts the page it loaded. Pages published by this repository's
+  workflow carry a build attestation; a page from anywhere else is only as
+  trustworthy as whoever serves it.
 - Anyone can read an open round's terms and size. What was raised stays private;
   a subscription that would overflow the round is refused.
 - One deployment serves its calls through one relay account, because the
@@ -278,8 +334,8 @@ and its relay also ship as one container image: `docker build -t undiluted .`
 - The enclave trusts the RPC proxy of the worker it runs on to report
   transactions honestly. Confidentiality depends on the TEE and on OutLayer's
   platform; see [what its operator can and cannot do](https://github.com/out-layer/outlayer/blob/main/docs/NON_CUSTODIAL.md).
-  The Intel attestation chain is published by OutLayer per run and is not yet
-  verified by the client.
+  The client checks a run's Intel attestation and OutLayer's approved images, but
+  trusts OutLayer's worker image, once approved, to run the wasm it names.
 - Test payments run on Tidepool, a third-party sandbox not affiliated with NEAR,
   whose tokens have no value. NEAR Intents has no official testnet.
 - The ledger protects what is recorded in it. It cannot stop a founder from
