@@ -4,20 +4,22 @@
 //! includes the SAFEs themselves. That makes the capitalization a closed form:
 //! `existing shares / (1 - sum of SAFE ownership)`.
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::cap_table::{CapTable, Holding, Position};
 use crate::error::CapTableError;
 use crate::ids::{HolderId, InstrumentId};
 use crate::math::{Ratio, mul_div_floor};
 use crate::quantity::{Money, Shares};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct NewInvestment {
     pub instrument: InstrumentId,
     pub holder: HolderId,
     pub amount: Money,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct PricedRound {
     pub pre_money: Money,
     pub investments: Vec<NewInvestment>,

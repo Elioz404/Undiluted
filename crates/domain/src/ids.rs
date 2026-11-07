@@ -34,6 +34,10 @@ macro_rules! identifier {
 }
 
 identifier!(
+    /// The company a cap table belongs to.
+    CompanyId
+);
+identifier!(
     /// A party that can hold instruments, independent of how it pays or signs.
     HolderId
 );

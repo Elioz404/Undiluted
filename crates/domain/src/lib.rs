@@ -16,7 +16,7 @@ pub mod waterfall;
 pub use cap_table::{CapTable, Holding, Position};
 pub use conversion::{NewInvestment, PreferredIssuance, PricedRound, RoundOutcome};
 pub use error::CapTableError;
-pub use ids::{HolderId, InstrumentId};
+pub use ids::{CompanyId, HolderId, InstrumentId};
 pub use math::Ratio;
 pub use pro_forma::{Ownership, OwnershipLine, ProForma};
 pub use quantity::{BasisPoints, DiscountRate, Money, Shares};
