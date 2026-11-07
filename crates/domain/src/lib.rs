@@ -3,12 +3,16 @@
 //! All arithmetic is integer based so every environment that replays the same
 //! events (enclave, investor browser, tests) reaches exactly the same result.
 
+pub mod cap_table;
 pub mod error;
 pub mod ids;
 pub mod math;
 pub mod quantity;
+pub mod safe;
 
+pub use cap_table::{CapTable, Holding, Position};
 pub use error::CapTableError;
 pub use ids::{HolderId, InstrumentId};
 pub use math::Ratio;
 pub use quantity::{BasisPoints, DiscountRate, Money, Shares};
+pub use safe::{Safe, SafeTerms};
