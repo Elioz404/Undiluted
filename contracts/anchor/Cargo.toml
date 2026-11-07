@@ -12,7 +12,11 @@ crate-type = ["cdylib", "rlib"]
 near-sdk.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 near-sdk = { workspace = true, features = ["unit-testing"] }
+undiluted-domain.workspace = true
+undiluted-ledger.workspace = true
+undiluted-service.workspace = true
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -1,14 +1,21 @@
 //! Public commitments to private cap tables.
 //!
 //! The contract stores only digests. It knows nothing about instruments or
-//! holders, yet because a head can never be replaced, a company cannot show
-//! two different histories to two different investors.
+//! holders, yet a head is accepted only with the enclave's signature and can
+//! never be replaced. So whoever relays it cannot forge a history, and a company
+//! cannot show two different histories to two different investors.
 
-use near_sdk::json_types::Base58CryptoHash;
+use near_sdk::borsh::to_vec;
+use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    env, near, require, AccountId, BorshStorageKey, CryptoHash, NearToken, PanicOnDefault, Promise,
+    env, near, require, BorshStorageKey, CryptoHash, CurveType, NearToken, PanicOnDefault, Promise,
+    PublicKey,
 };
+
+/// Must match the attestation the enclave signs in the service crate. A test
+/// checks real attestations against this contract so the two cannot drift.
+const ATTESTATION_TAG: &str = "undiluted/service/anchor/v1";
 
 #[derive(BorshStorageKey)]
 #[near]
@@ -20,7 +27,9 @@ enum StorageKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[near(serializers = [borsh, json])]
 pub struct Company {
-    pub authority: AccountId,
+    /// The only key whose signature can extend this company's history. It cannot
+    /// be changed, so nobody can take over a history later.
+    pub enclave_key: PublicKey,
     pub next_sequence: u64,
 }
 
@@ -29,12 +38,7 @@ pub enum AnchorEvent {
     #[event_version("1.0.0")]
     CompanyRegistered {
         company_id: String,
-        authority: AccountId,
-    },
-    #[event_version("1.0.0")]
-    AuthorityTransferred {
-        company_id: String,
-        authority: AccountId,
+        enclave_key: PublicKey,
     },
     #[event_version("1.0.0")]
     HeadAnchored {
@@ -62,21 +66,25 @@ impl AnchorRegistry {
         }
     }
 
-    /// Claims a company id for the caller, who becomes its authority.
+    /// Ties a company id to an enclave's signing key. Investors compare this
+    /// key with the enclave they talk to.
     #[payable]
-    pub fn register_company(&mut self, company_id: String) {
+    pub fn register_company(&mut self, company_id: String, enclave_key: PublicKey) {
         let storage_before = env::storage_usage();
         require!(!company_id.is_empty(), "company id must not be empty");
+        require!(
+            enclave_key.curve_type() == CurveType::ED25519,
+            "enclave key must be ed25519"
+        );
         require!(
             !self.companies.contains_key(&company_id),
             "company id is already registered"
         );
 
-        let authority = env::predecessor_account_id();
         self.companies.insert(
             company_id.clone(),
             Company {
-                authority: authority.clone(),
+                enclave_key: enclave_key.clone(),
                 next_sequence: 0,
             },
         );
@@ -85,37 +93,44 @@ impl AnchorRegistry {
 
         AnchorEvent::CompanyRegistered {
             company_id,
-            authority,
+            enclave_key,
         }
         .emit();
     }
 
-    /// Hands control over to another account, e.g. a key held by an enclave.
-    #[payable]
-    pub fn transfer_authority(&mut self, company_id: String, authority: AccountId) {
-        near_sdk::assert_one_yocto();
-        let company = self.company_for_authority(&company_id);
-        company.authority = authority.clone();
-
-        AnchorEvent::AuthorityTransferred {
-            company_id,
-            authority,
-        }
-        .emit();
-    }
-
-    /// Records the head for `sequence`. Sequences must arrive in order and a
+    /// Records the head for `sequence`. Anyone may relay it, because only the
+    /// enclave's signature makes it valid. Sequences must arrive in order and a
     /// recorded head can never be changed.
     #[payable]
-    pub fn anchor(&mut self, company_id: String, sequence: u64, head: Base58CryptoHash) {
+    pub fn anchor(
+        &mut self,
+        company_id: String,
+        sequence: u64,
+        head: Base58CryptoHash,
+        signature: Base64VecU8,
+    ) {
         let storage_before = env::storage_usage();
-        let company = self.company_for_authority(&company_id);
+        let head_bytes = CryptoHash::from(head);
+        let company = self
+            .companies
+            .get_mut(&company_id)
+            .unwrap_or_else(|| env::panic_str("unknown company"));
         require!(sequence == company.next_sequence, "unexpected sequence");
+        require!(
+            is_valid_attestation(
+                &company.enclave_key,
+                &company_id,
+                sequence,
+                &head_bytes,
+                &signature.0
+            ),
+            "invalid enclave signature"
+        );
+
         company.next_sequence += 1;
         self.companies.flush();
-
         self.heads
-            .insert((company_id.clone(), sequence), CryptoHash::from(head));
+            .insert((company_id.clone(), sequence), head_bytes);
         self.heads.flush();
         settle_storage(storage_before);
 
@@ -139,18 +154,30 @@ impl AnchorRegistry {
             .copied()
             .map(Base58CryptoHash::from)
     }
+}
 
-    fn company_for_authority(&mut self, company_id: &str) -> &mut Company {
-        let company = self
-            .companies
-            .get_mut(company_id)
-            .unwrap_or_else(|| env::panic_str("unknown company"));
-        require!(
-            company.authority == env::predecessor_account_id(),
-            "only the company authority can do this"
-        );
-        company
-    }
+fn is_valid_attestation(
+    enclave_key: &PublicKey,
+    company_id: &str,
+    sequence: u64,
+    head: &CryptoHash,
+    signature: &[u8],
+) -> bool {
+    let Ok(signature) = <&[u8; 64]>::try_from(signature) else {
+        return false;
+    };
+    let Ok(key) = <&[u8; 32]>::try_from(&enclave_key.as_bytes()[1..]) else {
+        return false;
+    };
+    let Ok(payload) = to_vec(&(company_id, sequence, head)) else {
+        return false;
+    };
+
+    let mut tagged = Vec::with_capacity(8 + ATTESTATION_TAG.len() + payload.len());
+    tagged.extend_from_slice(&(ATTESTATION_TAG.len() as u64).to_le_bytes());
+    tagged.extend_from_slice(ATTESTATION_TAG.as_bytes());
+    tagged.extend_from_slice(&payload);
+    env::ed25519_verify(signature, env::sha256_array(&tagged), key)
 }
 
 /// Charges the caller for the storage just used and refunds the rest.
@@ -170,13 +197,19 @@ fn settle_storage(storage_before: u64) {
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
     use near_sdk::test_utils::{accounts, VMContextBuilder};
     use near_sdk::testing_env;
+    use undiluted_domain::CompanyId;
+    use undiluted_ledger::Digest;
+    use undiluted_service::HeadAttestation;
 
     use super::*;
 
     const COMPANY: &str = "acme";
     const DEPOSIT: NearToken = NearToken::from_millinear(100);
+    const ENCLAVE_SEED: u8 = 7;
+    const FORGER_SEED: u8 = 9;
 
     fn act_as(account: usize, deposit: NearToken) {
         testing_env!(VMContextBuilder::new()
@@ -185,24 +218,47 @@ mod tests {
             .build());
     }
 
-    fn head(byte: u8) -> Base58CryptoHash {
-        Base58CryptoHash::from([byte; 32])
+    fn signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn public_key(seed: u8) -> PublicKey {
+        let mut bytes = vec![0u8];
+        bytes.extend_from_slice(signing_key(seed).verifying_key().as_bytes());
+        PublicKey::try_from(bytes).unwrap()
+    }
+
+    /// Signs exactly what the enclave signs, using the service's own digest.
+    fn attest(seed: u8, sequence: u64, head: [u8; 32]) -> (Base58CryptoHash, Base64VecU8) {
+        let company = CompanyId::new(COMPANY).unwrap();
+        let digest =
+            HeadAttestation::signing_digest(&company, sequence, &Digest::from_bytes(head)).unwrap();
+        let signature = signing_key(seed)
+            .sign(digest.as_bytes())
+            .to_bytes()
+            .to_vec();
+        (Base58CryptoHash::from(head), Base64VecU8::from(signature))
     }
 
     fn registered() -> AnchorRegistry {
         act_as(0, DEPOSIT);
         let mut registry = AnchorRegistry::new();
-        registry.register_company(COMPANY.to_owned());
+        registry.register_company(COMPANY.to_owned(), public_key(ENCLAVE_SEED));
         registry
     }
 
+    fn anchor(registry: &mut AnchorRegistry, seed: u8, sequence: u64, byte: u8) {
+        let (head, signature) = attest(seed, sequence, [byte; 32]);
+        registry.anchor(COMPANY.to_owned(), sequence, head, signature);
+    }
+
     #[test]
-    fn registering_makes_the_caller_the_authority() {
+    fn registering_records_the_enclave_key() {
         let registry = registered();
         assert_eq!(
             registry.company(COMPANY.to_owned()),
             Some(Company {
-                authority: accounts(0),
+                enclave_key: public_key(ENCLAVE_SEED),
                 next_sequence: 0,
             })
         );
@@ -212,8 +268,7 @@ mod tests {
     #[should_panic(expected = "company id is already registered")]
     fn company_ids_cannot_be_claimed_twice() {
         let mut registry = registered();
-        act_as(1, DEPOSIT);
-        registry.register_company(COMPANY.to_owned());
+        registry.register_company(COMPANY.to_owned(), public_key(FORGER_SEED));
     }
 
     #[test]
@@ -221,69 +276,74 @@ mod tests {
     fn registering_requires_paying_for_storage() {
         act_as(0, NearToken::from_yoctonear(0));
         let mut registry = AnchorRegistry::new();
-        registry.register_company(COMPANY.to_owned());
+        registry.register_company(COMPANY.to_owned(), public_key(ENCLAVE_SEED));
     }
 
     #[test]
-    fn anchored_heads_can_be_read_back() {
+    fn attestations_signed_by_the_enclave_are_accepted_from_any_relay() {
         let mut registry = registered();
-        registry.anchor(COMPANY.to_owned(), 0, head(1));
-        registry.anchor(COMPANY.to_owned(), 1, head(2));
+        anchor(&mut registry, ENCLAVE_SEED, 0, 1);
 
-        assert_eq!(registry.head_at(COMPANY.to_owned(), 0), Some(head(1)));
-        assert_eq!(registry.head_at(COMPANY.to_owned(), 1), Some(head(2)));
+        act_as(1, DEPOSIT);
+        anchor(&mut registry, ENCLAVE_SEED, 1, 2);
+
+        let expected = Base58CryptoHash::from([2u8; 32]);
+        assert_eq!(registry.head_at(COMPANY.to_owned(), 1), Some(expected));
         assert_eq!(registry.head_at(COMPANY.to_owned(), 2), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid enclave signature")]
+    fn another_key_cannot_write_history() {
+        let mut registry = registered();
+        anchor(&mut registry, FORGER_SEED, 0, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid enclave signature")]
+    fn a_signature_cannot_be_reused_for_another_head() {
+        let mut registry = registered();
+        let (_, signature) = attest(ENCLAVE_SEED, 0, [1; 32]);
+        registry.anchor(
+            COMPANY.to_owned(),
+            0,
+            Base58CryptoHash::from([2u8; 32]),
+            signature,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid enclave signature")]
+    fn a_malformed_signature_is_rejected() {
+        let mut registry = registered();
+        registry.anchor(
+            COMPANY.to_owned(),
+            0,
+            Base58CryptoHash::from([1u8; 32]),
+            Base64VecU8::from(vec![0u8; 10]),
+        );
     }
 
     #[test]
     #[should_panic(expected = "unexpected sequence")]
     fn a_recorded_head_cannot_be_overwritten() {
         let mut registry = registered();
-        registry.anchor(COMPANY.to_owned(), 0, head(1));
-        registry.anchor(COMPANY.to_owned(), 0, head(9));
+        anchor(&mut registry, ENCLAVE_SEED, 0, 1);
+        anchor(&mut registry, ENCLAVE_SEED, 0, 9);
     }
 
     #[test]
     #[should_panic(expected = "unexpected sequence")]
     fn sequences_cannot_be_skipped() {
         let mut registry = registered();
-        registry.anchor(COMPANY.to_owned(), 1, head(1));
-    }
-
-    #[test]
-    #[should_panic(expected = "only the company authority can do this")]
-    fn only_the_authority_can_anchor() {
-        let mut registry = registered();
-        act_as(1, DEPOSIT);
-        registry.anchor(COMPANY.to_owned(), 0, head(1));
+        anchor(&mut registry, ENCLAVE_SEED, 1, 1);
     }
 
     #[test]
     #[should_panic(expected = "unknown company")]
     fn unknown_companies_cannot_anchor() {
         let mut registry = registered();
-        registry.anchor("other".to_owned(), 0, head(1));
-    }
-
-    #[test]
-    fn authority_can_be_transferred() {
-        let mut registry = registered();
-        act_as(0, NearToken::from_yoctonear(1));
-        registry.transfer_authority(COMPANY.to_owned(), accounts(1));
-
-        act_as(1, DEPOSIT);
-        registry.anchor(COMPANY.to_owned(), 0, head(1));
-        assert_eq!(registry.head_at(COMPANY.to_owned(), 0), Some(head(1)));
-    }
-
-    #[test]
-    #[should_panic(expected = "only the company authority can do this")]
-    fn the_previous_authority_loses_access() {
-        let mut registry = registered();
-        act_as(0, NearToken::from_yoctonear(1));
-        registry.transfer_authority(COMPANY.to_owned(), accounts(1));
-
-        act_as(0, DEPOSIT);
-        registry.anchor(COMPANY.to_owned(), 0, head(1));
+        let (head, signature) = attest(ENCLAVE_SEED, 0, [1; 32]);
+        registry.anchor("other".to_owned(), 0, head, signature);
     }
 }
