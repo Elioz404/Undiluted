@@ -3095,6 +3095,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "undiluted-distribution"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "near-sdk",
+ "undiluted-domain",
+ "undiluted-service",
+]
+
+[[package]]
 name = "undiluted-domain"
 version = "0.1.0"
 dependencies = [

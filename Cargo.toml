@@ -8,6 +8,7 @@ members = [
     "crates/client",
     "crates/cli",
     "contracts/anchor",
+    "contracts/distribution",
 ]
 exclude = ["crates/enclave"]
 
