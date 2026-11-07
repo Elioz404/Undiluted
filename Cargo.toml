@@ -11,6 +11,16 @@ members = [
     "contracts/anchor",
     "contracts/distribution",
 ]
+# Contracts build only for wasm (see the README), so a plain `cargo build` leaves them out.
+default-members = [
+    "crates/domain",
+    "crates/ledger",
+    "crates/envelope",
+    "crates/service",
+    "crates/client",
+    "crates/cli",
+    "crates/web",
+]
 exclude = ["crates/enclave"]
 
 [workspace.package]

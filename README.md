@@ -39,14 +39,16 @@ Three things happen without anyone approving them each time:
   holder sees an offer in their statement, without learning who got those terms
   or for how much, and adopts them alone. The company cannot block it.
 - **Exits pay out on their own.** The board approves a sale once. The enclave
-  works out the waterfall and signs each payout; a contract holds the proceeds
-  and pays only what is signed, each payment once, never more than was deposited.
+  works out the waterfall and signs each payout. A contract holds the proceeds in
+  a distribution that belongs to whoever funded it, and pays only what is signed,
+  each payment once, never more than was deposited.
 
 ## Try it in two minutes
 
 Needs [Rust](https://rustup.rs). The toolchain is pinned in `rust-toolchain.toml`
-and installs itself. On Windows without the MSVC build tools, prefix the commands
-with `docker run --rm -v "$PWD:/work" -w /work rust:1.99`.
+and installs itself. Without a local Rust toolchain, run the same commands in
+Docker by prefixing them with `docker run --rm -v "$PWD:/work" -w /work rust:1.99.1`
+(in Git Bash on Windows, set `MSYS_NO_PATHCONV=1` first so the path is not rewritten).
 
 ```bash
 cargo run -p undiluted-cli -- demo local
@@ -95,7 +97,16 @@ cargo test --workspace
 A company console and an investor view in the browser. Keys are made and kept in
 the browser; requests are signed and encrypted there by the same Rust code,
 compiled to WebAssembly. A small relay forwards ciphertext to the enclave and
-pays for transactions; it never sees a key or a position.
+pays for transactions; it never sees a key or a position, and it cannot stand in
+for the enclave:
+
+- The site pins the enclave's signing key at build time, and that key signs the
+  enclave's encryption key, so a relay cannot hand out a key of its own.
+- **Check against NEAR** reads the head, and the enclave key the company
+  registered, from NEAR's RPC directly, not through the relay.
+- The relay pays for everything from its own test funds, so it rate limits each
+  address, caps each payment and exit, and keeps one daily budget for everyone.
+  It relays a payout only after the contract confirms the enclave signed it.
 
 To run it locally you need Node 24, `wasm-bindgen-cli` 0.2.130 and a funded
 testnet account for the relay:
@@ -103,7 +114,7 @@ testnet account for the relay:
 ```bash
 cargo install wasm-bindgen-cli --version 0.2.130 --locked
 cd web && npm ci && sh scripts/build-wasm.sh
-cp .env.example .env.local   # then set RELAY_ACCOUNT and RELAY_PRIVATE_KEY
+cp .env.example .env.local   # set RELAY_ACCOUNT, RELAY_PRIVATE_KEY, VITE_ENCLAVE_SIGNING_KEY
 npm run dev
 ```
 
@@ -123,14 +134,20 @@ Each step is a real enclave run on testnet, so it takes several seconds. The
 whole flow also runs headless against a relay:
 
 ```bash
-cd web && RELAY_URL=http://localhost:8080 npx tsx scripts/e2e.ts
+cd web && RELAY_URL=http://localhost:8080 npx tsx --env-file=.env.local scripts/e2e.ts
 ```
+
+It creates a company, invites Ana, issues her SAFE against a real payment, opens
+a round that Ben joins alone while someone else's claim on his payment is
+refused, sells the company, and pays everyone out through the distribution
+contract, where a forged payout is refused before the relay spends anything.
 
 ## Deployed on NEAR testnet
 
 | What | Where |
 | --- | --- |
-| Enclave (OutLayer project, Intel TDX) | `undiluted-dev.testnet/undiluted`, wasm sha256 `2da08346d01a5765beb364ecadc6df667bbe91fe4832b03a5d83b9e98bd961b1` |
+| Enclave (OutLayer project, Intel TDX) | `undiluted-dev.testnet/undiluted`, wasm sha256 `c3b8b92a101e575d1c0e2e502c1fc21443fa0e08e864e84fe467d5840bda9f77` |
+| Enclave signing key (pinned by the site) | `4385ac1675dfd32bf15f994b0bd1effead92649d12ad7422b7ab003ef97f6ab4` |
 | Anchor contract | [`anchor.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/anchor.undiluted-dev.testnet) |
 | Distribution contract | [`distribution.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/distribution.undiluted-dev.testnet) |
 | Treasury | [`treasury.undiluted-dev.testnet`](https://testnet.nearblocks.io/address/treasury.undiluted-dev.testnet) |
@@ -145,7 +162,7 @@ flowchart LR
   E -- reads payments --> N[(NEAR RPC)]
   R -- signed head --> A[Anchor contract]
   R -- signed payout --> D[Distribution contract]
-  B -- compares heads --> A
+  B -- reads heads and keys --> A
 ```
 
 - **Every change is a signed event.** The current table is never stored on its
@@ -159,10 +176,13 @@ flowchart LR
   the head, commits to everything before it without revealing any of it.
 - **The table lives in a TEE.** The service runs in an Intel TDX enclave on
   [OutLayer](https://outlayer.ai), with storage only that code can decrypt. Its
-  signing key is generated inside the TEE and never leaves it.
+  signing key is generated inside the TEE and never leaves it, and it signs the
+  encryption key clients use.
 - **Messages are encrypted end to end.** Inputs and outputs of on-chain runs are
   public, so each request and reply is encrypted between the client and the
-  enclave (X25519, HKDF, ChaCha20-Poly1305) and padded so its size says nothing.
+  enclave (X25519, HKDF, ChaCha20-Poly1305) and padded to 1 KiB blocks, so its
+  length does not tell which operation it carries. The enclave answers each
+  request once; a replayed envelope gets the same reply back, never a new one.
 - **Heads are anchored on NEAR.** The anchor contract accepts a head only with
   the enclave's signature, only in order, and never replaces one. An investor
   compares the head in their statement with the published one.
@@ -239,7 +259,15 @@ and its relay also ship as one container image: `docker build -t undiluted .`
   A SAFE with no valuation cap can only take its money back. Unissued options and
   token warrants receive nothing.
 - One proposal is open per company at a time, so two investors subscribing at the
-  same moment take turns.
+  same moment take turns. A subscriber who proposes and never signs holds the
+  round until the company withdraws the proposal; their payment stays theirs to
+  claim again.
+- The browser keeps keys in local storage for its origin, so in this demo the
+  company console and an investor view opened in the same browser could read
+  each other's keys. Real holders each use their own browser. The page's content
+  security policy allows scripts only from the site itself.
+- The browser trusts the site it loaded. Whoever serves the page could serve
+  different code, as with any web app; running the site locally removes that.
 - Anyone can read an open round's terms and size. What was raised stays private;
   a subscription that would overflow the round is refused.
 - One deployment serves its calls through one relay account, because the

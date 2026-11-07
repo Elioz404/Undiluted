@@ -45,3 +45,13 @@ services:
         value: "5000000"
       - key: MAX_EXIT_MICROS
         value: "10000000"
+      - key: DAILY_BUDGET_MICROS
+        value: "60000000"
+      # Read by the site's build: it reads heads from NEAR directly and only
+      # talks to the enclave whose signing key is pinned here.
+      - key: VITE_NEAR_RPC_URL
+        value: https://rpc.testnet.fastnear.com
+      - key: VITE_ANCHOR_CONTRACT
+        value: anchor.undiluted-dev.testnet
+      - key: VITE_ENCLAVE_SIGNING_KEY
+        value: 4385ac1675dfd32bf15f994b0bd1effead92649d12ad7422b7ab003ef97f6ab4

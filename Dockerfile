@@ -3,7 +3,7 @@
 #   docker build -t undiluted .
 #   docker run --env-file web/.env.local -p 8080:8080 undiluted
 
-FROM rust:1.99 AS protocol
+FROM rust:1.99.1 AS protocol
 WORKDIR /build
 RUN rustup target add wasm32-unknown-unknown \
  && cargo install wasm-bindgen-cli --version 0.2.130 --locked
@@ -19,6 +19,10 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web ./
 COPY --from=protocol /build/web/src/wasm ./src/wasm
+# The site pins these at build time: where to read NEAR, and which enclave to trust.
+ARG VITE_NEAR_RPC_URL
+ARG VITE_ANCHOR_CONTRACT
+ARG VITE_ENCLAVE_SIGNING_KEY
 RUN npm run build && npm test
 
 FROM node:24-slim

@@ -2,7 +2,6 @@ target
 **/target
 .git
 .github
-.claude
 web/node_modules
 web/dist
 web/src/wasm
