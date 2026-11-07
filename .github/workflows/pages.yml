@@ -1,0 +1,61 @@
+# Builds the site from this repository and publishes it on GitHub Pages, apart
+# from whoever runs the relay. The build is attested, so anyone can check that
+# the files they were served came from this workflow and a given commit:
+#
+#   gh attestation verify <downloaded file> --repo Elioz404/Undiluted
+name: Site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.130
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: sh scripts/build-wasm.sh
+      # Everything else the site trusts is in web/.env.production.
+      - run: npm run build
+        env:
+          VITE_RELAY_URL: ${{ vars.RELAY_URL }}
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: web/dist/**
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

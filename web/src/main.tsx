@@ -4,8 +4,11 @@ import { createRoot } from "react-dom/client";
 import { Company } from "./pages/Company.tsx";
 import { Holder } from "./pages/Holder.tsx";
 import { Landing } from "./pages/Landing.tsx";
+import { useRelayAt } from "./lib/relay.ts";
 import { useRoute, type Route } from "./router.ts";
 import "./styles.css";
+
+useRelayAt(import.meta.env.VITE_RELAY_URL ?? "");
 
 /** Where you are: the company, then whose view this is. */
 function Crumbs({ route }: { route: Route }) {

@@ -3,6 +3,8 @@
 .env
 .env.*
 !.env.example
+# Public build settings for the site; never secrets.
+!web/.env.production
 .DS_Store
 .idea/
 .vscode/

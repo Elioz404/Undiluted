@@ -25,6 +25,8 @@ services:
         value: outlayer.testnet
       - key: ENCLAVE_PROJECT
         value: undiluted-dev.testnet/undiluted
+      - key: OUTLAYER_API_URL
+        value: https://testnet-api.outlayer.ai
       - key: SECRETS_ACCOUNT
         value: undiluted-dev.testnet
       - key: SECRETS_PROFILE
@@ -47,11 +49,6 @@ services:
         value: "10000000"
       - key: DAILY_BUDGET_MICROS
         value: "60000000"
-      # Read by the site's build: it reads heads from NEAR directly and only
-      # talks to the enclave whose signing key is pinned here.
-      - key: VITE_NEAR_RPC_URL
-        value: https://rpc.testnet.fastnear.com
-      - key: VITE_ANCHOR_CONTRACT
-        value: anchor.undiluted-dev.testnet
-      - key: VITE_ENCLAVE_SIGNING_KEY
-        value: 4385ac1675dfd32bf15f994b0bd1effead92649d12ad7422b7ab003ef97f6ab4
+      # The site is also published on GitHub Pages, from this repository.
+      - key: ALLOWED_ORIGINS
+        value: https://elioz404.github.io
