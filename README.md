@@ -31,8 +31,10 @@ commitment to its history.
   out each payout and signs it; a contract holds the funds and pays only what is
   signed, each payment once, never more than was deposited. Anyone can relay a
   payment, and nobody can change its recipient or amount.
-- **Investments settle through NEAR Intents.** An investor pays through the 1Click
-  API and the SAFE records what the treasury actually received.
+- **Investments are checked on chain.** An investor pays through the 1Click API. A
+  SAFE is only accepted if the token's own contract recorded that exact amount
+  arriving at the company's treasury, in a final transaction, and no other instrument
+  already relies on that payment.
 
 The rules use integer arithmetic only: replaying the same events gives the same
 result on any machine.
@@ -90,7 +92,7 @@ Do this, and see this:
 | `cargo test -p undiluted-domain mfn` | A later SAFE with better terms lets an earlier MFN holder adopt them |
 | `cargo test -p undiluted-ledger` | Altered, removed or forged entries are rejected, and a rewritten history no longer matches the head a holder kept |
 | `cargo test -p undiluted-envelope` | Only the enclave opens a request, only the sender opens the reply, and tampering is detected |
-| `cargo test -p undiluted-service` | Who may do what, and that a retried request does not act twice |
+| `cargo test -p undiluted-service` | Who may do what, that a retried request does not act twice, and that a SAFE cannot rest on an invented, reused, redirected or inflated payment |
 | `cargo test -p undiluted-client` | Answers lost on the way back do not apply anything twice |
 | `cargo test -p undiluted-anchor` | A head needs the enclave's signature and cannot be overwritten or skipped |
 | `cargo test -p undiluted-distribution` | A relay cannot change a payout, repeat one, or pay more than was deposited |
@@ -144,8 +146,8 @@ cargo run -p undiluted-cli -- demo deployed --project OWNER/PROJECT --secrets-ac
 - Exit payouts go directly to NEAR accounts, so their recipients and amounts are
   public on chain. Each investor's view in the product stays private; the chain does
   not hide the final transfers.
-- Payments in the demo start from a NEAR account. The enclave records the settlement
-  reference the parties sign; it does not check the payment on chain.
+- Payments in the demo start from a NEAR account. The enclave trusts the RPC proxy
+  of the worker it runs on to report transactions honestly.
 - A settlement does not hide amounts: deposits on the paying chain stay visible. What
   stays private is the cap table.
 - Confidentiality depends on the TEE and on OutLayer's platform; see

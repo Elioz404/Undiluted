@@ -7,10 +7,11 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use demo::{Destinations, Environment};
 use undiluted_client::{
-    ClientError, LocalAnchors, LocalPayouts, LocalRail, LocalTransport, NearAnchors,
-    NearAnchorsConfig, NearCli, NearPayouts, NearPayoutsConfig, OneClickConfig, OneClickRail,
-    OutLayerConfig, OutLayerTransport, RetryPolicy,
+    ClientError, LOCAL_TOKEN, LOCAL_TREASURY, LocalAnchors, LocalPayouts, LocalRail,
+    LocalTransport, NearAnchors, NearAnchorsConfig, NearCli, NearPayouts, NearPayoutsConfig,
+    OneClickConfig, OneClickRail, OutLayerConfig, OutLayerTransport, RetryPolicy,
 };
+use undiluted_ledger::Treasury;
 
 #[derive(Parser)]
 #[command(name = "undiluted", about = "A confidential, verifiable cap table")]
@@ -151,10 +152,12 @@ fn run_deployed(deployment: Deployment) -> Result<(), ClientError> {
             std::env::var(&name).map_err(|_| ClientError::Payment(format!("{name} is not set")))
         })
         .transpose()?;
+    let token = token_contract(&deployment.destination_asset)?;
+    let treasury = Treasury::new(deployment.treasury.clone(), token.clone())?;
     let payouts = NearPayouts::new(NearPayoutsConfig {
         near: near.clone(),
         contract: deployment.distribution_contract,
-        token: token_contract(&deployment.destination_asset)?,
+        token,
         rpc_url: deployment.rpc_url,
         call_gas: deployment.distribution_gas,
         pay_gas: deployment.payout_gas,
@@ -173,7 +176,7 @@ fn run_deployed(deployment: Deployment) -> Result<(), ClientError> {
             api_token,
             origin_asset: deployment.origin_asset,
             destination_asset: deployment.destination_asset,
-            treasury: deployment.treasury,
+            treasury: deployment.treasury.clone(),
             slippage_basis_points: deployment.slippage_basis_points,
             quote_validity: Duration::from_secs(deployment.quote_validity_seconds),
             poll_interval: Duration::from_secs(deployment.poll_seconds),
@@ -193,6 +196,7 @@ fn run_deployed(deployment: Deployment) -> Result<(), ClientError> {
             ana: deployment.ana_account,
             ben: deployment.ben_account,
         },
+        treasury,
     })
 }
 
@@ -214,6 +218,7 @@ fn run_local() -> Result<(), ClientError> {
             ana: "ana.local".to_owned(),
             ben: "ben.local".to_owned(),
         },
+        treasury: Treasury::new(LOCAL_TREASURY, LOCAL_TOKEN)?,
     })
 }
 

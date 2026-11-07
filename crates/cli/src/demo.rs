@@ -8,19 +8,25 @@ use undiluted_domain::{
     CompanyId, HolderId, InstrumentId, MfnOffer, Money, Ownership, PayoutBasis, Ratio, Safe,
     SafeTerms, Shares,
 };
-use undiluted_ledger::{Event, PayoutDestination, SettlementReference};
+use undiluted_ledger::{Event, PayoutDestination, SettlementReference, Treasury};
 use undiluted_service::wire::AnchorOutput;
-use undiluted_service::{Actor, Command, Response, Statement};
+use undiluted_service::{Actor, Command, PayoutInstruction, PayoutPlan, Response, Statement};
 
 const MICROS_PER_DOLLAR: u128 = 1_000_000;
 const RATIO_PER_BASIS_POINT: u128 = 100_000_000_000_000;
 const MAX_ATTEMPTS: u32 = 8;
 
 const FOUNDER_SHARES: u128 = 8_000_000;
-const ANA_INVESTMENT: u128 = 10;
-const BEN_INVESTMENT: u128 = 20;
-const BEN_POST_MONEY_CAP: u128 = 200;
-const EXIT_PROCEEDS: u128 = 60;
+const ANA_INVESTMENT: u128 = 2;
+const BEN_INVESTMENT: u128 = 3;
+const BEN_POST_MONEY_CAP: u128 = 30;
+const EXIT_PROCEEDS: u128 = 10;
+/// A valid-looking transaction hash that does not exist.
+const INVENTED_PAYMENT: &str = "11111111111111111111111111111111";
+/// A real payment this small is then claimed to be ten times larger.
+const SMALL_PAYMENT: u128 = 1;
+const INFLATION_FACTOR: u128 = 10;
+const MAX_REASON_LENGTH: usize = 120;
 const FORGED_HEAD: [u8; 32] = [0xab; 32];
 const FORGED_SIGNATURE: [u8; 64] = [0xcd; 64];
 
@@ -50,6 +56,7 @@ pub struct Environment<T, R, P, X> {
     pub rail: P,
     pub payouts: X,
     pub destinations: Destinations,
+    pub treasury: Treasury,
 }
 
 /// Where each holder wants to be paid at exit.
@@ -65,6 +72,7 @@ struct Demo<T, R, P, X> {
     rail: P,
     payouts: X,
     destinations: Destinations,
+    treasury: Treasury,
     company_id: CompanyId,
     company: Party,
     founder: Member,
@@ -104,6 +112,7 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
             rail: environment.rail,
             payouts: environment.payouts,
             destinations: environment.destinations,
+            treasury: environment.treasury,
             company_id,
             company,
             founder: Member::new("founder")?,
@@ -124,6 +133,11 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
         expect(matches!(created, Response::CompanyCreated { .. }), &created)?;
         let enclave_key = self.client.identity().signing_key;
         self.anchors.register(&self.company_id, &enclave_key)?;
+
+        step("The company names its treasury: investments must arrive there, in this token");
+        self.commit_as_company(Event::TreasuryDesignated {
+            treasury: self.treasury.clone(),
+        })?;
 
         step("The founder and two investors register, each proving their own key");
         let members = [
@@ -165,12 +179,13 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
         let event = issue_safe(
             "safe-ben",
             &self.ben,
-            settlement,
+            settlement.clone(),
             Some(BEN_POST_MONEY_CAP),
             false,
         )?;
         let (party, actor) = (self.ben.party.clone(), self.ben.actor());
-        self.commit(event, &party, actor)
+        self.commit(event, &party, actor)?;
+        self.attack_payments(&settlement)
     }
 
     fn pay(&mut self, dollars: u128) -> Result<Settlement, ClientError> {
@@ -181,6 +196,60 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
             settlement.reference
         );
         Ok(settlement)
+    }
+
+    fn attack_payments(&mut self, real_payment: &Settlement) -> Result<(), ClientError> {
+        step("A founder tries to issue a SAFE for a payment that never happened");
+        let invented = Settlement {
+            received: usd(BEN_INVESTMENT),
+            reference: INVENTED_PAYMENT.to_owned(),
+        };
+        let event = issue_safe(
+            "safe-invented",
+            &self.ben,
+            invented,
+            Some(BEN_POST_MONEY_CAP),
+            false,
+        )?;
+        self.expect_issuance_refused(event)?;
+
+        step("A founder tries to use Ben's real payment for a second SAFE");
+        let event = issue_safe(
+            "safe-reused",
+            &self.ben,
+            real_payment.clone(),
+            Some(BEN_POST_MONEY_CAP),
+            false,
+        )?;
+        self.expect_issuance_refused(event)?;
+
+        step("An investor really pays a small amount, and the founder claims it was larger");
+        let small = self.pay(SMALL_PAYMENT)?;
+        let inflated = Settlement {
+            received: Money::new(small.received.value() * INFLATION_FACTOR),
+            reference: small.reference,
+        };
+        let event = issue_safe(
+            "safe-inflated",
+            &self.ben,
+            inflated,
+            Some(BEN_POST_MONEY_CAP),
+            false,
+        )?;
+        self.expect_issuance_refused(event)
+    }
+
+    fn expect_issuance_refused(&mut self, event: Event) -> Result<(), ClientError> {
+        let company = self.company.clone();
+        match self.client.propose(&company, Actor::Company, event) {
+            Err(ClientError::Enclave(reason)) => {
+                println!("  Refused by the enclave: {}", shorten(&reason));
+                Ok(())
+            }
+            other => Err(ClientError::Protocol(format!(
+                "the SAFE was not refused: {other:?}"
+            ))),
+        }
     }
 
     fn discover_better_terms(&mut self) -> Result<MfnOffer, ClientError> {
@@ -267,7 +336,9 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
             signature: hex::encode(FORGED_SIGNATURE),
         };
         match self.anchors.publish(&forged) {
-            Err(ClientError::Anchor(_)) => println!("  Refused by the registry."),
+            Err(ClientError::Anchor(reason)) => {
+                println!("  Refused by the registry: {}", shorten(&reason));
+            }
             other => {
                 return Err(ClientError::Protocol(format!(
                     "the forged head was not refused: {other:?}"
@@ -309,11 +380,16 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
             self.publish_anchors()?;
         }
 
-        step("The company is sold for $60. The board signs once, and that is the last human step");
-        let company = self.company.clone();
-        let event = Event::ExitApproved {
+        step(&format!(
+            "The company is sold for ${EXIT_PROCEEDS}. The board signs once, and that is the last human step"
+        ));
+        self.commit_as_company(Event::ExitApproved {
             proceeds: usd(EXIT_PROCEEDS),
-        };
+        })
+    }
+
+    fn commit_as_company(&mut self, event: Event) -> Result<(), ClientError> {
+        let company = self.company.clone();
         let response = self.client.commit(
             (&company, Actor::Company),
             event,
@@ -330,13 +406,15 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
             .open(&self.company_id, &enclave_key, usd(EXIT_PROCEEDS))?;
         self.payouts.fund(&self.company_id, usd(EXIT_PROCEEDS))?;
 
-        step("Each payment is relayed without anyone deciding anything");
         let plan = self
             .client
             .send(&self.company, Actor::Company, Command::GetPayoutPlan)?;
         let Response::PayoutPlan(plan) = plan else {
             return Err(ClientError::Protocol(format!("expected a plan: {plan:?}")));
         };
+        self.attack_payout(&plan)?;
+
+        step("Each payment is relayed without anyone deciding anything");
         for instruction in &plan.instructions {
             self.payouts.pay(&self.company_id, instruction)?;
             println!(
@@ -346,28 +424,48 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
             );
         }
 
-        step("A payment altered by whoever relays it is refused");
-        let mut altered = plan
-            .instructions
-            .first()
-            .ok_or_else(|| ClientError::Protocol("the plan is empty".to_owned()))?
-            .clone();
-        altered.index =
-            u32::try_from(plan.instructions.len()).map_err(|_| ClientError::Encoding)?;
-        match self.payouts.pay(&self.company_id, &altered) {
-            Err(ClientError::Payout(_)) => println!("  Refused by the contract."),
-            other => {
-                return Err(ClientError::Protocol(format!(
-                    "the altered payment was not refused: {other:?}"
-                )));
-            }
-        }
-
         step("Each investor sees only their own payout, and that the total adds up");
         let (ana, ben) = (self.ana.actor(), self.ben.actor());
         print_payout("Ana", &self.client.statement(&self.ana.party, ana)?);
         print_payout("Ben", &self.client.statement(&self.ben.party, ben)?);
         Ok(())
+    }
+
+    /// Tries what a dishonest relay would try, before any real payment is made.
+    fn attack_payout(&mut self, plan: &PayoutPlan) -> Result<(), ClientError> {
+        let first = plan
+            .instructions
+            .first()
+            .ok_or_else(|| ClientError::Protocol("the plan is empty".to_owned()))?;
+
+        step("A relay tries to send the first payment to its own account");
+        let mut stolen = first.clone();
+        stolen.recipient.clone_from(&self.treasury_account());
+        self.expect_payout_refused(&stolen)?;
+
+        step("A relay tries to inflate the first payment");
+        let mut inflated = first.clone();
+        inflated.amount = inflated.amount.checked_add(Money::new(1))?;
+        self.expect_payout_refused(&inflated)
+    }
+
+    fn treasury_account(&self) -> String {
+        self.treasury.account().to_owned()
+    }
+
+    fn expect_payout_refused(
+        &mut self,
+        instruction: &PayoutInstruction,
+    ) -> Result<(), ClientError> {
+        match self.payouts.pay(&self.company_id, instruction) {
+            Err(ClientError::PayoutRefused(reason)) => {
+                println!("  Refused by the contract: {reason}");
+                Ok(())
+            }
+            other => Err(ClientError::Protocol(format!(
+                "the altered payment was not refused: {other:?}"
+            ))),
+        }
     }
 
     fn commit(&mut self, event: Event, holder: &Party, actor: Actor) -> Result<(), ClientError> {
@@ -432,6 +530,10 @@ fn issue_safe(
         safe: Safe::new(settlement.received, terms)?,
         settlement: SettlementReference::new(settlement.reference)?,
     })
+}
+
+fn shorten(reason: &str) -> &str {
+    reason.get(..MAX_REASON_LENGTH).unwrap_or(reason)
 }
 
 fn step(title: &str) {
