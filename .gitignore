@@ -6,3 +6,6 @@
 .DS_Store
 .idea/
 .vscode/
+node_modules/
+web/dist/
+web/src/wasm/
