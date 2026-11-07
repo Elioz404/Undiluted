@@ -123,7 +123,7 @@ impl NearAnchors {
                 deposit: &self.0.deposit,
             })
             .map(|_| ())
-            .map_err(ClientError::Anchor)
+            .map_err(|failure| ClientError::Anchor(failure.to_string()))
     }
 }
 

@@ -8,8 +8,8 @@ use near_sdk::borsh::to_vec;
 use near_sdk::json_types::{Base64VecU8, U128};
 use near_sdk::store::{LookupMap, LookupSet};
 use near_sdk::{
-    env, ext_contract, near, require, AccountId, BorshStorageKey, CurveType, Gas, NearToken,
-    PanicOnDefault, Promise, PromiseError, PromiseOrValue, PublicKey,
+    env, ext_contract, near, AccountId, BorshStorageKey, CurveType, Gas, NearToken, PanicOnDefault,
+    Promise, PromiseError, PromiseOrValue, PublicKey,
 };
 
 /// Must match the instruction the enclave signs in the service crate. A test
@@ -18,6 +18,8 @@ const INSTRUCTION_TAG: &str = "undiluted/service/payout/v1";
 const FT_TRANSFER_GAS: Gas = Gas::from_tgas(15);
 const ON_PAID_GAS: Gas = Gas::from_tgas(10);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+
+const REFUSAL_MARKER: &str = "undiluted refused: ";
 
 #[derive(BorshStorageKey)]
 #[near]
@@ -86,14 +88,14 @@ impl DistributionRegistry {
         total: U128,
     ) {
         let storage_before = env::storage_usage();
-        require!(total.0 > 0, "total must be positive");
-        require!(
+        ensure(total.0 > 0, "total must be positive");
+        ensure(
             enclave_key.curve_type() == CurveType::ED25519,
-            "enclave key must be ed25519"
+            "enclave key must be ed25519",
         );
-        require!(
+        ensure(
             !self.distributions.contains_key(&company_id),
-            "distribution already exists"
+            "distribution already exists",
         );
         self.distributions.insert(
             company_id.clone(),
@@ -122,10 +124,10 @@ impl DistributionRegistry {
         let distribution = self
             .distributions
             .get_mut(&msg)
-            .unwrap_or_else(|| env::panic_str("unknown distribution"));
-        require!(
+            .unwrap_or_else(|| refuse("unknown distribution"));
+        ensure(
             env::predecessor_account_id() == distribution.token,
-            "wrong token"
+            "wrong token",
         );
         let missing = distribution.total.0.saturating_sub(distribution.funded.0);
         let accepted = missing.min(amount.0);
@@ -151,25 +153,25 @@ impl DistributionRegistry {
     ) -> Promise {
         let storage_before = env::storage_usage();
         let key = (company_id.clone(), index);
-        require!(!self.paid.contains(&key), "already paid");
+        ensure(!self.paid.contains(&key), "already paid");
 
         let distribution = self
             .distributions
             .get_mut(&company_id)
-            .unwrap_or_else(|| env::panic_str("unknown distribution"));
-        require!(
+            .unwrap_or_else(|| refuse("unknown distribution"));
+        ensure(
             is_valid_instruction(
                 &distribution.enclave_key,
                 &company_id,
                 index,
                 &recipient,
                 amount.0,
-                &signature.0
+                &signature.0,
             ),
-            "invalid enclave signature"
+            "invalid enclave signature",
         );
         let available = distribution.funded.0.saturating_sub(distribution.paid.0);
-        require!(amount.0 <= available, "not enough funds");
+        ensure(amount.0 <= available, "not enough funds");
 
         distribution.paid = U128(distribution.paid.0 + amount.0);
         let token = distribution.token.clone();
@@ -219,6 +221,19 @@ impl DistributionRegistry {
     }
 }
 
+/// Logs the reason before failing. A failed call's panic message does not reach
+/// callers reliably, but its logs do.
+fn refuse(reason: &str) -> ! {
+    env::log_str(&format!("{REFUSAL_MARKER}{reason}"));
+    env::panic_str(reason)
+}
+
+fn ensure(condition: bool, reason: &str) {
+    if !condition {
+        refuse(reason);
+    }
+}
+
 fn is_valid_instruction(
     enclave_key: &PublicKey,
     company_id: &str,
@@ -248,7 +263,7 @@ fn is_valid_instruction(
 fn settle_storage(storage_before: u64, attached: NearToken) {
     let used = env::storage_usage().saturating_sub(storage_before);
     let cost = env::storage_byte_cost().saturating_mul(u128::from(used));
-    require!(attached >= cost, "attached deposit does not cover storage");
+    ensure(attached >= cost, "attached deposit does not cover storage");
 
     let refund = attached.saturating_sub(cost);
     if refund > NearToken::from_yoctonear(0) {

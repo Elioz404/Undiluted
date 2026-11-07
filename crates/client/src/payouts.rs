@@ -12,9 +12,17 @@ use undiluted_ledger::PublicKey;
 use undiluted_service::PayoutInstruction;
 
 use crate::error::ClientError;
-use crate::near_cli::{ContractCall, NearCli, view};
+use crate::near_cli::{CallFailure, ContractCall, NearCli, view};
 
 const ONE_YOCTO: &str = "1 yoctoNEAR";
+const ALREADY_PAID: &str = "already paid";
+
+fn payout_failure(failure: CallFailure) -> ClientError {
+    match failure {
+        CallFailure::Refused(reason) => ClientError::PayoutRefused(reason),
+        CallFailure::Unclear(reason) => ClientError::Payout(reason),
+    }
+}
 
 pub trait PayoutExecutor {
     /// Starts a distribution for `total`, payable only on `enclave_key`'s word.
@@ -63,7 +71,7 @@ impl PayoutExecutor for LocalPayouts {
         total: Money,
     ) -> Result<(), ClientError> {
         if self.0.contains_key(company) {
-            return Err(ClientError::Payout(
+            return Err(ClientError::PayoutRefused(
                 "distribution already exists".to_owned(),
             ));
         }
@@ -100,17 +108,19 @@ impl PayoutExecutor for LocalPayouts {
         )?;
         let distribution = self.distribution(company)?;
         if distribution.paid_indexes.contains(&instruction.index) {
-            return Err(ClientError::Payout("already paid".to_owned()));
+            return Err(ClientError::PayoutRefused(ALREADY_PAID.to_owned()));
         }
         if !distribution
             .enclave_key
             .verifies(&digest, &instruction.signature)
         {
-            return Err(ClientError::Payout("invalid enclave signature".to_owned()));
+            return Err(ClientError::PayoutRefused(
+                "invalid enclave signature".to_owned(),
+            ));
         }
         let paid = distribution.paid.checked_add(instruction.amount)?;
         if paid > distribution.funded {
-            return Err(ClientError::Payout("not enough funds".to_owned()));
+            return Err(ClientError::PayoutRefused("not enough funds".to_owned()));
         }
         distribution.paid = paid;
         distribution.paid_indexes.insert(instruction.index);
@@ -183,7 +193,7 @@ impl NearPayouts {
                 deposit: &self.0.token_storage_deposit,
             })
             .map(|_| ())
-            .map_err(ClientError::Payout)
+            .map_err(payout_failure)
     }
 
     fn funded(&self, company: &CompanyId) -> Result<Money, ClientError> {
@@ -255,7 +265,7 @@ impl PayoutExecutor for NearPayouts {
                         gas: &self.0.call_gas,
                         deposit: &self.0.storage_deposit,
                     })
-                    .map_err(ClientError::Payout)
+                    .map_err(payout_failure)
             });
             if self.0.retry.eventually(|| self.exists(company)) {
                 return Ok(());
@@ -288,9 +298,9 @@ impl PayoutExecutor for NearPayouts {
         {
             return Ok(());
         }
-        Err(ClientError::Payout(sent.err().unwrap_or_else(|| {
-            "the funds did not reach the distribution".to_owned()
-        })))
+        Err(sent.map_or_else(payout_failure, |_| {
+            ClientError::Payout("the funds did not reach the distribution".to_owned())
+        }))
     }
 
     /// Safe to send again: the contract refuses to pay the same index twice.
@@ -320,8 +330,15 @@ impl PayoutExecutor for NearPayouts {
                             gas: &self.0.pay_gas,
                             deposit: &self.0.storage_deposit,
                         })
-                        .map_err(ClientError::Payout)
+                        .map_err(payout_failure)
                 });
+            // A real refusal will not change by trying again. "Already paid" is
+            // the one that means an earlier attempt landed.
+            if let Err(ClientError::PayoutRefused(reason)) = &sent
+                && reason != ALREADY_PAID
+            {
+                return sent.map(|_| ());
+            }
             if self.stays_paid(company, instruction.index) {
                 return Ok(());
             }
@@ -412,7 +429,7 @@ mod tests {
 
     fn rejected(result: Result<(), ClientError>) -> String {
         match result {
-            Err(ClientError::Payout(reason)) => reason,
+            Err(ClientError::PayoutRefused(reason)) => reason,
             other => panic!("expected a refusal, got {other:?}"),
         }
     }

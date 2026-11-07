@@ -11,6 +11,8 @@ use crate::near_cli::{ContractCall, NearCli};
 
 const STORAGE_REGISTRATION_ONLY: bool = true;
 const ONE_YOCTO: &str = "1 yoctoNEAR";
+/// Marks a settlement made by [`LocalRail`], as `<prefix><amount>:<count>`.
+pub(crate) const LOCAL_REFERENCE_PREFIX: &str = "local:";
 
 /// A payment that reached the treasury.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +38,7 @@ impl PaymentRail for LocalRail {
         self.paid += 1;
         Ok(Settlement {
             received: amount,
-            reference: format!("local-settlement-{}", self.paid),
+            reference: format!("{LOCAL_REFERENCE_PREFIX}{}:{}", amount.value(), self.paid),
         })
     }
 }
@@ -131,7 +133,7 @@ impl OneClickRail {
                 gas: &self.config.gas,
                 deposit: &self.config.storage_deposit,
             })
-            .map_err(ClientError::Payment)?;
+            .map_err(|failure| ClientError::Payment(failure.to_string()))?;
 
         let transfer = json!({
             "receiver_id": address,
@@ -145,7 +147,7 @@ impl OneClickRail {
                 gas: &self.config.gas,
                 deposit: ONE_YOCTO,
             })
-            .map_err(ClientError::Payment)
+            .map_err(|failure| ClientError::Payment(failure.to_string()))
     }
 
     fn wait_for_settlement(&self, address: &str) -> Result<Settlement, ClientError> {

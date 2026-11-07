@@ -9,13 +9,15 @@ use near_sdk::borsh::to_vec;
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    env, near, require, BorshStorageKey, CryptoHash, CurveType, NearToken, PanicOnDefault, Promise,
+    env, near, BorshStorageKey, CryptoHash, CurveType, NearToken, PanicOnDefault, Promise,
     PublicKey,
 };
 
 /// Must match the attestation the enclave signs in the service crate. A test
 /// checks real attestations against this contract so the two cannot drift.
 const ATTESTATION_TAG: &str = "undiluted/service/anchor/v1";
+
+const REFUSAL_MARKER: &str = "undiluted refused: ";
 
 #[derive(BorshStorageKey)]
 #[near]
@@ -71,14 +73,14 @@ impl AnchorRegistry {
     #[payable]
     pub fn register_company(&mut self, company_id: String, enclave_key: PublicKey) {
         let storage_before = env::storage_usage();
-        require!(!company_id.is_empty(), "company id must not be empty");
-        require!(
+        ensure(!company_id.is_empty(), "company id must not be empty");
+        ensure(
             enclave_key.curve_type() == CurveType::ED25519,
-            "enclave key must be ed25519"
+            "enclave key must be ed25519",
         );
-        require!(
+        ensure(
             !self.companies.contains_key(&company_id),
-            "company id is already registered"
+            "company id is already registered",
         );
 
         self.companies.insert(
@@ -114,17 +116,17 @@ impl AnchorRegistry {
         let company = self
             .companies
             .get_mut(&company_id)
-            .unwrap_or_else(|| env::panic_str("unknown company"));
-        require!(sequence == company.next_sequence, "unexpected sequence");
-        require!(
+            .unwrap_or_else(|| refuse("unknown company"));
+        ensure(sequence == company.next_sequence, "unexpected sequence");
+        ensure(
             is_valid_attestation(
                 &company.enclave_key,
                 &company_id,
                 sequence,
                 &head_bytes,
-                &signature.0
+                &signature.0,
             ),
-            "invalid enclave signature"
+            "invalid enclave signature",
         );
 
         company.next_sequence += 1;
@@ -153,6 +155,19 @@ impl AnchorRegistry {
             .get(&(company_id, sequence))
             .copied()
             .map(Base58CryptoHash::from)
+    }
+}
+
+/// Logs the reason before failing. A failed call's panic message does not reach
+/// callers reliably, but its logs do.
+fn refuse(reason: &str) -> ! {
+    env::log_str(&format!("{REFUSAL_MARKER}{reason}"));
+    env::panic_str(reason)
+}
+
+fn ensure(condition: bool, reason: &str) {
+    if !condition {
+        refuse(reason);
     }
 }
 
@@ -185,7 +200,7 @@ fn settle_storage(storage_before: u64) {
     let used = env::storage_usage().saturating_sub(storage_before);
     let cost = env::storage_byte_cost().saturating_mul(u128::from(used));
     let attached = env::attached_deposit();
-    require!(attached >= cost, "attached deposit does not cover storage");
+    ensure(attached >= cost, "attached deposit does not cover storage");
 
     let refund = attached.saturating_sub(cost);
     if refund > NearToken::from_yoctonear(0) {
