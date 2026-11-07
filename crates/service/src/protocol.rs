@@ -2,7 +2,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use undiluted_domain::{CompanyId, HolderId, MfnOffer, Money, Payout, ProForma};
-use undiluted_ledger::{Digest, Event, PublicKey, SignatureBytes};
+use undiluted_ledger::{Digest, Event, PublicKey, RoundMandate, SignatureBytes};
 
 use crate::error::ServiceError;
 
@@ -10,6 +10,18 @@ const REQUEST_TAG: &str = "undiluted/service/request/v1";
 const REPLY_TAG: &str = "undiluted/service/reply/v1";
 const ANCHOR_TAG: &str = "undiluted/service/anchor/v1";
 const PAYOUT_TAG: &str = "undiluted/service/payout/v1";
+const SUBSCRIPTION_MEMO_PREFIX: &str = "undiluted";
+
+/// The memo a payment for a subscription must carry. A payment's hash is public
+/// as soon as it lands, so the payment itself has to name the key it is for, or
+/// anyone watching the treasury could claim it.
+#[must_use]
+pub fn subscription_memo(company: &CompanyId, key: &PublicKey) -> String {
+    format!(
+        "{SUBSCRIPTION_MEMO_PREFIX}:{company}:{}",
+        hex::encode(key.as_bytes())
+    )
+}
 
 pub type RequestId = [u8; 16];
 
@@ -36,6 +48,9 @@ pub enum Command {
     GetCapTable,
     GetStatement,
     GetPayoutPlan,
+    /// The open round's terms. Anyone may read them, so an investor can decide
+    /// before paying; what was raised stays private.
+    GetRound,
 }
 
 impl Command {
@@ -166,6 +181,9 @@ pub enum Response {
     PayoutPlan(PayoutPlan),
     Rejected {
         reason: String,
+    },
+    Round {
+        mandate: Option<RoundMandate>,
     },
 }
 

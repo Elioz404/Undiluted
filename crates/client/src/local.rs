@@ -10,7 +10,7 @@ use undiluted_service::{
 
 use crate::error::ClientError;
 use crate::party::random_bytes;
-use crate::payments::LOCAL_REFERENCE_PREFIX;
+use crate::payments::{LOCAL_MEMO_SEPARATOR, LOCAL_REFERENCE_PREFIX};
 use crate::transport::{EnclaveIdentity, Exchange, Transport};
 use crate::wire_codec::{into_exchange, into_identity, request_input};
 
@@ -37,15 +37,23 @@ struct LocalChain;
 
 impl ChainReader for LocalChain {
     fn token_transfers(&self, reference: &str) -> Result<Vec<TokenTransfer>, ChainError> {
-        reference
+        let rest = reference
             .strip_prefix(LOCAL_REFERENCE_PREFIX)
-            .and_then(|rest| rest.split(':').next())
+            .ok_or_else(|| ChainError::Unavailable("no such transaction".to_owned()))?;
+        let (payment, memo) = match rest.split_once(LOCAL_MEMO_SEPARATOR) {
+            Some((payment, memo)) => (payment, Some(memo.to_owned())),
+            None => (rest, None),
+        };
+        payment
+            .split(':')
+            .next()
             .and_then(|amount| amount.parse().ok())
             .map(|amount| {
                 vec![TokenTransfer {
                     token: LOCAL_TOKEN.to_owned(),
                     to: LOCAL_TREASURY.to_owned(),
                     amount: Money::new(amount),
+                    memo,
                 }]
             })
             .ok_or_else(|| ChainError::Unavailable("no such transaction".to_owned()))

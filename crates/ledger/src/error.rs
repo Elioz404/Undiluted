@@ -33,6 +33,18 @@ pub enum LedgerError {
     EmptyTreasury,
     #[error("the treasury is already set")]
     TreasuryAlreadySet,
+    #[error("a round needs a minimum check above zero and no larger than the round")]
+    InvalidMandate,
+    #[error("a round is already open")]
+    RoundAlreadyOpen,
+    #[error("no round is open")]
+    NoOpenRound,
+    #[error("the minimum check in this round is {minimum} micro units")]
+    BelowMinimumCheck { minimum: u128 },
+    #[error("this check would take the round past its limit")]
+    RoundFull,
+    #[error("holder {0} is registered with a different key")]
+    KeyMismatch(HolderId),
     #[error("failed to encode an event")]
     Encoding,
 }

@@ -15,5 +15,5 @@ pub mod ledger;
 pub use crypto::{Digest, PublicKey, SignatureBytes};
 pub use entry::{Draft, Entry, HolderSignature};
 pub use error::LedgerError;
-pub use event::{Event, PayoutDestination, SettlementReference, Treasury};
-pub use ledger::{Ledger, LedgerConfig};
+pub use event::{Event, PayoutDestination, RoundMandate, SettlementReference, Treasury};
+pub use ledger::{Ledger, LedgerConfig, OpenRound};

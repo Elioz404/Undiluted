@@ -44,6 +44,7 @@ impl ChainReader for Chain {
             token: TOKEN.to_owned(),
             to: TREASURY.to_owned(),
             amount: Money::new(amount),
+            memo: None,
         }])
     }
 }

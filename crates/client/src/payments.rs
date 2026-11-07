@@ -11,8 +11,10 @@ use crate::near_cli::{ContractCall, NearCli};
 
 const STORAGE_REGISTRATION_ONLY: bool = true;
 const ONE_YOCTO: &str = "1 yoctoNEAR";
-/// Marks a settlement made by [`LocalRail`], as `<prefix><amount>:<count>`.
+/// Marks a settlement made by [`LocalRail`], as `<prefix><amount>:<count>`,
+/// followed by `#<memo>` when the payment carries one.
 pub(crate) const LOCAL_REFERENCE_PREFIX: &str = "local:";
+pub(crate) const LOCAL_MEMO_SEPARATOR: char = '#';
 
 /// A payment that reached the treasury.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,20 @@ pub struct Settlement {
 pub trait PaymentRail {
     /// Pays `amount` into the treasury and waits for it to settle.
     fn pay(&mut self, amount: Money) -> Result<Settlement, ClientError>;
+
+    /// Whether this rail can attach a memo to the transfer the treasury sees.
+    fn attaches_memos(&self) -> bool {
+        false
+    }
+
+    /// Pays `amount` into the treasury with `memo` on the transfer, as a
+    /// subscription to an open round needs.
+    fn pay_with_memo(&mut self, amount: Money, memo: &str) -> Result<Settlement, ClientError> {
+        let _ = (amount, memo);
+        Err(ClientError::Payment(
+            "this payment rail cannot attach a memo".to_owned(),
+        ))
+    }
 }
 
 /// Pretends a payment settled in full, for the local demo.
@@ -39,6 +55,18 @@ impl PaymentRail for LocalRail {
         Ok(Settlement {
             received: amount,
             reference: format!("{LOCAL_REFERENCE_PREFIX}{}:{}", amount.value(), self.paid),
+        })
+    }
+
+    fn attaches_memos(&self) -> bool {
+        true
+    }
+
+    fn pay_with_memo(&mut self, amount: Money, memo: &str) -> Result<Settlement, ClientError> {
+        let settlement = self.pay(amount)?;
+        Ok(Settlement {
+            reference: format!("{}{LOCAL_MEMO_SEPARATOR}{memo}", settlement.reference),
+            ..settlement
         })
     }
 }

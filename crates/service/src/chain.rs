@@ -25,6 +25,7 @@ pub struct TokenTransfer {
     pub token: String,
     pub to: String,
     pub amount: Money,
+    pub memo: Option<String>,
 }
 
 pub trait ChainReader {
@@ -90,6 +91,7 @@ fn transfers_in_log(token: &str, log: &str) -> Vec<TokenTransfer> {
                 token: token.to_owned(),
                 to: transfer["new_owner_id"].as_str()?.to_owned(),
                 amount: Money::new(transfer["amount"].as_str()?.parse().ok()?),
+                memo: transfer["memo"].as_str().map(str::to_owned),
             })
         })
         .collect()
@@ -137,7 +139,28 @@ mod tests {
                 token: TOKEN.to_owned(),
                 to: TREASURY.to_owned(),
                 amount: Money::new(1_993_690),
+                memo: None,
             }]
+        );
+    }
+
+    #[test]
+    fn the_memo_on_a_transfer_is_read() {
+        let event = json!({
+            "standard": "nep141",
+            "version": "1.0.0",
+            "event": "ft_transfer",
+            "data": [{
+                "old_owner_id": "carol.near",
+                "new_owner_id": TREASURY,
+                "amount": "5",
+                "memo": "undiluted:acme:00ff",
+            }],
+        });
+        let tx = transaction(TOKEN, &format!("EVENT_JSON:{event}"), &success());
+        assert_eq!(
+            parse_transfers(&tx).unwrap()[0].memo.as_deref(),
+            Some("undiluted:acme:00ff")
         );
     }
 

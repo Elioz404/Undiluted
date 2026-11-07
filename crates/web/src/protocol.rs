@@ -51,6 +51,15 @@ pub fn party_public_key(secret: &str) -> Result<String, WebError> {
     Ok(hex::encode(signing_key(secret)?.verifying_key().to_bytes()))
 }
 
+/// The memo a payment for a subscription to `company`'s open round must carry,
+/// for the holder whose public key is `key` (hex).
+pub fn subscription_memo(company: &str, key: &str) -> Result<String, WebError> {
+    Ok(undiluted_service::subscription_memo(
+        &CompanyId::new(company)?,
+        &PublicKey::from_bytes(decode_key(key)?),
+    ))
+}
+
 fn parse_identity(identity: &str) -> Result<([u8; 32], PublicKey), WebError> {
     let identity: Identity =
         serde_json::from_str(identity).map_err(|error| WebError::input(&error))?;
@@ -80,6 +89,7 @@ fn into_command(command: CommandDto, key: &SigningKey) -> Result<Command, WebErr
         CommandDto::GetCapTable => Command::GetCapTable,
         CommandDto::GetStatement => Command::GetStatement,
         CommandDto::GetPayoutPlan => Command::GetPayoutPlan,
+        CommandDto::GetRound => Command::GetRound,
     })
 }
 

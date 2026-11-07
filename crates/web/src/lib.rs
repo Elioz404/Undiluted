@@ -12,7 +12,9 @@ use wasm_bindgen::prelude::wasm_bindgen;
 
 pub use dto::{ActorDto, CommandDto, EventDto, ResponseDto};
 pub use error::WebError;
-pub use protocol::{PreparedRequest, open_reply, party_public_key, prepare_request};
+pub use protocol::{
+    PreparedRequest, open_reply, party_public_key, prepare_request, subscription_memo,
+};
 
 /// A new signing key for a company or a holder, as hex. Keep it secret.
 #[wasm_bindgen(js_name = newParty)]
@@ -49,4 +51,11 @@ pub fn open_reply_js(identity: &str, prepared: &str, envelope: &str) -> Result<S
         serde_json::from_str(prepared).map_err(|error| error.to_string())?;
     let response = open_reply(identity, &prepared, envelope).map_err(|error| error.to_string())?;
     serde_json::to_string(&response).map_err(|error| error.to_string())
+}
+
+/// The memo a payment must carry to subscribe to `company`'s open round with
+/// the holder key `key` (hex). Without it the enclave refuses the payment.
+#[wasm_bindgen(js_name = subscriptionMemo)]
+pub fn subscription_memo_js(company: &str, key: &str) -> Result<String, String> {
+    subscription_memo(company, key).map_err(|error| error.to_string())
 }

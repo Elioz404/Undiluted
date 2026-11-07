@@ -1,16 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use undiluted_domain::{CapTable, CompanyId, HolderId, Money, Payout};
+use undiluted_domain::{CapTable, CompanyId, HolderId, Money, Payout, Safe};
 
 use crate::crypto::{Digest, PublicKey};
 use crate::entry::{Draft, Entry, entry_digest, genesis_digest};
 use crate::error::LedgerError;
-use crate::event::{Event, PayoutDestination, Treasury};
+use crate::event::{Event, PayoutDestination, RoundMandate, Treasury};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerConfig {
     pub company: CompanyId,
     pub company_key: PublicKey,
+}
+
+/// A SAFE round the company opened, and what investors have put in so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenRound {
+    pub mandate: RoundMandate,
+    pub raised: Money,
 }
 
 /// What replaying the events produces. An event applies to a copy, so a
@@ -23,6 +30,7 @@ struct State {
     exit_proceeds: Option<Money>,
     treasury: Option<Treasury>,
     used_settlements: BTreeSet<String>,
+    round: Option<OpenRound>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +84,11 @@ impl Ledger {
     #[must_use]
     pub fn payout_destination(&self, holder: &HolderId) -> Option<&PayoutDestination> {
         self.state.payout_destinations.get(holder)
+    }
+
+    #[must_use]
+    pub const fn open_round(&self) -> Option<OpenRound> {
+        self.state.round
     }
 
     #[must_use]
@@ -179,6 +192,11 @@ impl Ledger {
         }
         let mut next = self.state.clone();
         event.apply_to(&mut next.table)?;
+        if let Some((settlement, _)) = event.settlement()
+            && !next.used_settlements.insert(settlement.as_str().to_owned())
+        {
+            return Err(LedgerError::SettlementReused);
+        }
         match event {
             Event::HolderRegistered { holder, key } => {
                 if next.holder_keys.contains_key(holder) {
@@ -193,9 +211,48 @@ impl Ledger {
                 next.payout_destinations
                     .insert(holder.clone(), destination.clone());
             }
-            Event::SafeIssued { settlement, .. } => {
-                if !next.used_settlements.insert(settlement.as_str().to_owned()) {
-                    return Err(LedgerError::SettlementReused);
+            Event::SafeRoundOpened { mandate } => {
+                if next.round.is_some() {
+                    return Err(LedgerError::RoundAlreadyOpen);
+                }
+                next.round = Some(OpenRound {
+                    mandate: *mandate,
+                    raised: Money::ZERO,
+                });
+            }
+            Event::SafeSubscribed {
+                instrument,
+                holder,
+                key,
+                purchase,
+                ..
+            } => {
+                let round = next.round.as_mut().ok_or(LedgerError::NoOpenRound)?;
+                if *purchase < round.mandate.min_check() {
+                    return Err(LedgerError::BelowMinimumCheck {
+                        minimum: round.mandate.min_check().value(),
+                    });
+                }
+                round.raised = round.raised.checked_add(*purchase)?;
+                if round.raised > round.mandate.max_raise() {
+                    return Err(LedgerError::RoundFull);
+                }
+                let safe = Safe::new(*purchase, round.mandate.terms())?;
+                match next.holder_keys.get(holder) {
+                    Some(registered) if registered != key => {
+                        return Err(LedgerError::KeyMismatch(holder.clone()));
+                    }
+                    Some(_) => {}
+                    None => {
+                        next.holder_keys.insert(holder.clone(), *key);
+                    }
+                }
+                next.table
+                    .issue_safe(instrument.clone(), holder.clone(), safe)?;
+            }
+            Event::SafeRoundEnded => {
+                if next.round.take().is_none() {
+                    return Err(LedgerError::NoOpenRound);
                 }
             }
             Event::TreasuryDesignated { treasury } => {
@@ -254,8 +311,8 @@ impl Ledger {
         &self,
         event: &Event,
     ) -> Result<Vec<(HolderId, PublicKey)>, LedgerError> {
-        // A new holder proves control of the key being registered.
-        if let Event::HolderRegistered { holder, key } = event {
+        // A new holder proves control of the key being brought in.
+        if let Some((holder, key)) = event.introduced_key() {
             return Ok(vec![(holder.clone(), *key)]);
         }
         event
@@ -816,5 +873,244 @@ mod tests {
                 .position(),
             Position::Preferred { .. }
         ));
+    }
+
+    const CAROL_SEED: u8 = 4;
+
+    fn mandate(cap: u128, min_check: u128, max_raise: u128) -> RoundMandate {
+        RoundMandate::new(
+            SafeTerms::new(Some(usd(cap)), None, true).unwrap(),
+            usd(min_check),
+            usd(max_raise),
+        )
+        .unwrap()
+    }
+
+    fn subscription(id: &str, owner: &str, seed: u8, purchase: u128) -> Event {
+        Event::SafeSubscribed {
+            instrument: instrument(id),
+            holder: holder(owner),
+            key: public_key(seed),
+            purchase: usd(purchase),
+            settlement: SettlementReference::new(format!("tx-{id}")).unwrap(),
+        }
+    }
+
+    /// Appends with the investor's signature alone, as a subscription is made.
+    fn subscribe(ledger: &mut Ledger, event: Event, seed: u8) -> Result<Digest, LedgerError> {
+        let draft = ledger.draft(event)?;
+        let (owner, _) = draft.event.introduced_key().unwrap();
+        let signature = HolderSignature {
+            holder: owner.clone(),
+            signature: sign(seed, &draft.digest),
+        };
+        ledger.append(draft.seal(None, vec![signature]))
+    }
+
+    fn open_round(cap: u128, min_check: u128, max_raise: u128) -> Ledger {
+        let mut ledger = funded_ledger();
+        commit(
+            &mut ledger,
+            Event::SafeRoundOpened {
+                mandate: mandate(cap, min_check, max_raise),
+            },
+            &[],
+        );
+        ledger
+    }
+
+    #[test]
+    fn a_round_lets_a_new_investor_subscribe_without_the_company() {
+        let mut ledger = open_round(10_000_000, 100_000, 1_000_000);
+
+        subscribe(
+            &mut ledger,
+            subscription("safe-carol", "carol", CAROL_SEED, 250_000),
+            CAROL_SEED,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ledger.holder_key(&holder("carol")),
+            Some(public_key(CAROL_SEED))
+        );
+        let Position::Safe(safe) = ledger
+            .table()
+            .holding(&instrument("safe-carol"))
+            .unwrap()
+            .position()
+        else {
+            panic!("expected a SAFE");
+        };
+        assert_eq!(safe.purchase_amount(), usd(250_000));
+        assert_eq!(ledger.open_round().unwrap().raised, usd(250_000));
+    }
+
+    #[test]
+    fn a_subscription_takes_the_round_terms_and_replays() {
+        let mut ledger = open_round(10_000_000, 100_000, 1_000_000);
+        subscribe(
+            &mut ledger,
+            subscription("safe-carol", "carol", CAROL_SEED, 250_000),
+            CAROL_SEED,
+        )
+        .unwrap();
+
+        let replayed = Ledger::replay(config(), ledger.entries().to_vec()).unwrap();
+        assert_eq!(replayed.head(), ledger.head());
+        assert_eq!(replayed.table(), ledger.table());
+        assert_eq!(replayed.open_round(), ledger.open_round());
+    }
+
+    #[test]
+    fn a_subscription_needs_an_open_round() {
+        let mut ledger = funded_ledger();
+        assert_eq!(
+            subscribe(
+                &mut ledger,
+                subscription("safe-carol", "carol", CAROL_SEED, 250_000),
+                CAROL_SEED
+            ),
+            Err(LedgerError::NoOpenRound)
+        );
+    }
+
+    #[test]
+    fn a_round_enforces_its_minimum_check_and_its_limit() {
+        let mut ledger = open_round(10_000_000, 100_000, 300_000);
+        assert_eq!(
+            subscribe(
+                &mut ledger,
+                subscription("small", "carol", CAROL_SEED, 50_000),
+                CAROL_SEED
+            ),
+            Err(LedgerError::BelowMinimumCheck {
+                minimum: usd(100_000).value()
+            })
+        );
+        subscribe(
+            &mut ledger,
+            subscription("first", "carol", CAROL_SEED, 200_000),
+            CAROL_SEED,
+        )
+        .unwrap();
+        assert_eq!(
+            subscribe(
+                &mut ledger,
+                subscription("second", "mallory", MALLORY_SEED, 200_000),
+                MALLORY_SEED
+            ),
+            Err(LedgerError::RoundFull)
+        );
+    }
+
+    #[test]
+    fn a_subscription_cannot_be_signed_by_someone_else() {
+        let mut ledger = open_round(10_000_000, 100_000, 1_000_000);
+        assert!(matches!(
+            subscribe(
+                &mut ledger,
+                subscription("safe-carol", "carol", CAROL_SEED, 250_000),
+                MALLORY_SEED
+            ),
+            Err(LedgerError::InvalidHolderSignature { .. })
+        ));
+    }
+
+    #[test]
+    fn a_registered_holder_subscribes_only_with_their_own_key() {
+        let mut ledger = open_round(10_000_000, 100_000, 1_000_000);
+        assert_eq!(
+            subscribe(
+                &mut ledger,
+                subscription("more-ben", "ben", MALLORY_SEED, 250_000),
+                MALLORY_SEED
+            ),
+            Err(LedgerError::KeyMismatch(holder("ben")))
+        );
+        subscribe(
+            &mut ledger,
+            subscription("more-ben", "ben", BEN_SEED, 250_000),
+            BEN_SEED,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_subscription_cannot_reuse_a_payment() {
+        let mut ledger = open_round(10_000_000, 100_000, 1_000_000);
+        subscribe(
+            &mut ledger,
+            subscription("safe-carol", "carol", CAROL_SEED, 250_000),
+            CAROL_SEED,
+        )
+        .unwrap();
+        let reused = Event::SafeSubscribed {
+            instrument: instrument("again"),
+            holder: holder("mallory"),
+            key: public_key(MALLORY_SEED),
+            purchase: usd(250_000),
+            settlement: SettlementReference::new("tx-safe-carol").unwrap(),
+        };
+        assert_eq!(
+            subscribe(&mut ledger, reused, MALLORY_SEED),
+            Err(LedgerError::SettlementReused)
+        );
+    }
+
+    #[test]
+    fn opening_and_ending_a_round_needs_the_company() {
+        let mut ledger = funded_ledger();
+        let draft = ledger
+            .draft(Event::SafeRoundOpened {
+                mandate: mandate(10_000_000, 100_000, 1_000_000),
+            })
+            .unwrap();
+        assert!(draft.company_must_sign);
+        assert!(matches!(
+            ledger.append(draft.seal(None, Vec::new())),
+            Err(LedgerError::InvalidCompanySignature { .. })
+        ));
+    }
+
+    #[test]
+    fn an_ended_round_takes_no_more_subscriptions() {
+        let mut ledger = open_round(10_000_000, 100_000, 1_000_000);
+        commit(&mut ledger, Event::SafeRoundEnded, &[]);
+        assert_eq!(ledger.open_round(), None);
+        assert_eq!(
+            subscribe(
+                &mut ledger,
+                subscription("late", "carol", CAROL_SEED, 250_000),
+                CAROL_SEED
+            ),
+            Err(LedgerError::NoOpenRound)
+        );
+    }
+
+    #[test]
+    fn only_one_round_is_open_at_a_time() {
+        let ledger = open_round(10_000_000, 100_000, 1_000_000);
+        assert_eq!(
+            ledger
+                .draft(Event::SafeRoundOpened {
+                    mandate: mandate(10_000_000, 100_000, 1_000_000)
+                })
+                .err(),
+            Some(LedgerError::RoundAlreadyOpen)
+        );
+    }
+
+    #[test]
+    fn a_mandate_needs_a_sensible_minimum_check() {
+        let terms = SafeTerms::new(Some(usd(10_000_000)), None, false).unwrap();
+        assert_eq!(
+            RoundMandate::new(terms, usd(0), usd(1)),
+            Err(LedgerError::InvalidMandate)
+        );
+        assert_eq!(
+            RoundMandate::new(terms, usd(2), usd(1)),
+            Err(LedgerError::InvalidMandate)
+        );
     }
 }

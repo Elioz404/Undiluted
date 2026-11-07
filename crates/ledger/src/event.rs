@@ -1,6 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use undiluted_domain::{
-    BasisPoints, CapTable, CapTableError, HolderId, InstrumentId, Money, PricedRound, Safe, Shares,
+    BasisPoints, CapTable, CapTableError, HolderId, InstrumentId, Money, PricedRound, Safe,
+    SafeTerms, Shares,
 };
 
 use crate::crypto::PublicKey;
@@ -71,6 +72,45 @@ impl PayoutDestination {
     }
 }
 
+/// What a company authorizes in advance for a SAFE round: these terms, for any
+/// check of at least `min_check`, until `max_raise` is reached or the round ends.
+/// Within it, an investor subscribes on their own and the enclave records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RoundMandate {
+    terms: SafeTerms,
+    min_check: Money,
+    max_raise: Money,
+}
+
+impl RoundMandate {
+    pub fn new(terms: SafeTerms, min_check: Money, max_raise: Money) -> Result<Self, LedgerError> {
+        if min_check.is_zero() || min_check > max_raise {
+            return Err(LedgerError::InvalidMandate);
+        }
+        Ok(Self {
+            terms,
+            min_check,
+            max_raise,
+        })
+    }
+
+    #[must_use]
+    pub const fn terms(&self) -> SafeTerms {
+        self.terms
+    }
+
+    #[must_use]
+    pub const fn min_check(&self) -> Money {
+        self.min_check
+    }
+
+    #[must_use]
+    pub const fn max_raise(&self) -> Money {
+        self.max_raise
+    }
+}
+
+/// New variants go at the end: stored entries are decoded by position.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Event {
     HolderRegistered {
@@ -113,18 +153,62 @@ pub enum Event {
     TreasuryDesignated {
         treasury: Treasury,
     },
+    SafeRoundOpened {
+        mandate: RoundMandate,
+    },
+    /// A SAFE an investor took on their own under the open round. It carries
+    /// their key, so someone new joins the cap table in the same entry.
+    SafeSubscribed {
+        instrument: InstrumentId,
+        holder: HolderId,
+        key: PublicKey,
+        purchase: Money,
+        settlement: SettlementReference,
+    },
+    SafeRoundEnded,
 }
 
 impl Event {
     /// An MFN election exercises a right the company granted when it issued the
     /// SAFE, so the company cannot withhold it. Where a holder gets paid is the
-    /// holder's own business. The rules still validate both.
+    /// holder's own business. A subscription rests on the round the company
+    /// opened. The rules still validate all three.
     #[must_use]
     pub const fn requires_company_signature(&self) -> bool {
         !matches!(
             self,
-            Self::MfnElected { .. } | Self::PayoutDestinationSet { .. }
+            Self::MfnElected { .. }
+                | Self::PayoutDestinationSet { .. }
+                | Self::SafeSubscribed { .. }
         )
+    }
+
+    /// A holder and the key this event brings in. Its signature proves control
+    /// of that key, so the holder need not be registered yet.
+    #[must_use]
+    pub const fn introduced_key(&self) -> Option<(&HolderId, &PublicKey)> {
+        match self {
+            Self::HolderRegistered { holder, key } | Self::SafeSubscribed { holder, key, .. } => {
+                Some((holder, key))
+            }
+            _ => None,
+        }
+    }
+
+    /// The payment this event rests on, and the amount it must have moved.
+    #[must_use]
+    pub fn settlement(&self) -> Option<(&SettlementReference, Money)> {
+        match self {
+            Self::SafeIssued {
+                safe, settlement, ..
+            } => Some((settlement, safe.purchase_amount())),
+            Self::SafeSubscribed {
+                purchase,
+                settlement,
+                ..
+            } => Some((settlement, *purchase)),
+            _ => None,
+        }
     }
 
     /// Holders whose rights this event creates or changes, who must therefore
@@ -137,9 +221,12 @@ impl Event {
             Self::HolderRegistered { .. }
             | Self::OptionPoolResized { .. }
             | Self::ExitApproved { .. }
-            | Self::TreasuryDesignated { .. } => Vec::new(),
+            | Self::TreasuryDesignated { .. }
+            | Self::SafeRoundOpened { .. }
+            | Self::SafeRoundEnded => Vec::new(),
             Self::CommonIssued { holder, .. }
             | Self::SafeIssued { holder, .. }
+            | Self::SafeSubscribed { holder, .. }
             | Self::TokenWarrantIssued { holder, .. }
             | Self::PayoutDestinationSet { holder, .. } => vec![holder.clone()],
             Self::MfnElected { target, .. } => vec![table.holding(target)?.holder().clone()],
@@ -156,12 +243,17 @@ impl Event {
         })
     }
 
+    /// Changes to the table alone. A subscription is applied by the ledger,
+    /// which holds the round whose terms it takes.
     pub(crate) fn apply_to(&self, table: &mut CapTable) -> Result<(), CapTableError> {
         match self {
             Self::HolderRegistered { .. }
             | Self::PayoutDestinationSet { .. }
             | Self::ExitApproved { .. }
-            | Self::TreasuryDesignated { .. } => Ok(()),
+            | Self::TreasuryDesignated { .. }
+            | Self::SafeRoundOpened { .. }
+            | Self::SafeSubscribed { .. }
+            | Self::SafeRoundEnded => Ok(()),
             Self::CommonIssued {
                 instrument,
                 holder,

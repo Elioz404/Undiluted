@@ -8,7 +8,7 @@ use undiluted_domain::{
     Payout, PayoutBasis, Safe, SafeTerms, Shares,
 };
 use undiluted_ledger::{
-    Digest, Event, PayoutDestination, PublicKey, SettlementReference, Treasury,
+    Digest, Event, PayoutDestination, PublicKey, RoundMandate, SettlementReference, Treasury,
 };
 use undiluted_service::{Actor, ProposalView, Response, Statement};
 
@@ -42,6 +42,63 @@ pub enum CommandDto {
     GetCapTable,
     GetStatement,
     GetPayoutPlan,
+    GetRound,
+}
+
+/// SAFE terms: a post-money cap, a discount, an MFN clause, each optional.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermsDto {
+    pub valuation_cap_micros: Option<String>,
+    pub discount_basis_points: Option<u16>,
+    pub mfn: bool,
+}
+
+impl TermsDto {
+    fn into_terms(self) -> Result<SafeTerms, WebError> {
+        let cap = self
+            .valuation_cap_micros
+            .map(|cap| amount(&cap).map(Money::new))
+            .transpose()?;
+        let discount = self
+            .discount_basis_points
+            .map(|basis_points| DiscountRate::new(BasisPoints::new(basis_points)?))
+            .transpose()?;
+        Ok(SafeTerms::new(cap, discount, self.mfn)?)
+    }
+
+    fn from_terms(terms: &SafeTerms) -> Self {
+        Self {
+            valuation_cap_micros: terms.valuation_cap().map(|cap| cap.value().to_string()),
+            discount_basis_points: terms.discount().map(|rate| rate.discount().value()),
+            mfn: terms.has_mfn_clause(),
+        }
+    }
+}
+
+/// What a company authorized for its open round.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MandateDto {
+    pub terms: TermsDto,
+    pub min_check_micros: String,
+    pub max_raise_micros: String,
+}
+
+impl MandateDto {
+    fn into_mandate(self) -> Result<RoundMandate, WebError> {
+        Ok(RoundMandate::new(
+            self.terms.into_terms()?,
+            Money::new(amount(&self.min_check_micros)?),
+            Money::new(amount(&self.max_raise_micros)?),
+        )?)
+    }
+
+    fn from_mandate(mandate: &RoundMandate) -> Self {
+        Self {
+            terms: TermsDto::from_terms(&mandate.terms()),
+            min_check_micros: mandate.min_check().value().to_string(),
+            max_raise_micros: mandate.max_raise().value().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +137,17 @@ pub enum EventDto {
     ExitApproved {
         proceeds_micros: String,
     },
+    SafeRoundOpened {
+        mandate: MandateDto,
+    },
+    SafeSubscribed {
+        instrument: String,
+        holder: String,
+        key: String,
+        purchase_micros: String,
+        settlement: String,
+    },
+    SafeRoundEnded,
     /// Anything the browser does not need to build, shown for review only.
     Other {
         description: String,
@@ -131,19 +199,15 @@ impl EventDto {
                 mfn,
                 settlement,
             } => {
-                let cap = valuation_cap_micros
-                    .map(|cap| amount(&cap).map(Money::new))
-                    .transpose()?;
-                let discount = discount_basis_points
-                    .map(|basis_points| DiscountRate::new(BasisPoints::new(basis_points)?))
-                    .transpose()?;
+                let terms = TermsDto {
+                    valuation_cap_micros,
+                    discount_basis_points,
+                    mfn,
+                };
                 Event::SafeIssued {
                     instrument: InstrumentId::new(instrument)?,
                     holder: HolderId::new(holder)?,
-                    safe: Safe::new(
-                        Money::new(amount(&purchase_micros)?),
-                        SafeTerms::new(cap, discount, mfn)?,
-                    )?,
+                    safe: Safe::new(Money::new(amount(&purchase_micros)?), terms.into_terms()?)?,
                     settlement: SettlementReference::new(settlement)?,
                 }
             }
@@ -161,6 +225,23 @@ impl EventDto {
             Self::ExitApproved { proceeds_micros } => Event::ExitApproved {
                 proceeds: Money::new(amount(&proceeds_micros)?),
             },
+            Self::SafeRoundOpened { mandate } => Event::SafeRoundOpened {
+                mandate: mandate.into_mandate()?,
+            },
+            Self::SafeSubscribed {
+                instrument,
+                holder,
+                key,
+                purchase_micros,
+                settlement,
+            } => Event::SafeSubscribed {
+                instrument: InstrumentId::new(instrument)?,
+                holder: HolderId::new(holder)?,
+                key: PublicKey::from_bytes(decode_key(&key)?),
+                purchase: Money::new(amount(&purchase_micros)?),
+                settlement: SettlementReference::new(settlement)?,
+            },
+            Self::SafeRoundEnded => Event::SafeRoundEnded,
             Self::Other { .. } => {
                 return Err(WebError::Input(
                     "this event cannot be proposed here".to_owned(),
@@ -193,18 +274,18 @@ impl EventDto {
                 holder,
                 safe,
                 settlement,
-            } => Self::SafeIssued {
-                instrument: instrument.to_string(),
-                holder: holder.to_string(),
-                purchase_micros: safe.purchase_amount().value().to_string(),
-                valuation_cap_micros: safe
-                    .terms()
-                    .valuation_cap()
-                    .map(|cap| cap.value().to_string()),
-                discount_basis_points: safe.terms().discount().map(|rate| rate.discount().value()),
-                mfn: safe.terms().has_mfn_clause(),
-                settlement: settlement.as_str().to_owned(),
-            },
+            } => {
+                let terms = TermsDto::from_terms(safe.terms());
+                Self::SafeIssued {
+                    instrument: instrument.to_string(),
+                    holder: holder.to_string(),
+                    purchase_micros: safe.purchase_amount().value().to_string(),
+                    valuation_cap_micros: terms.valuation_cap_micros,
+                    discount_basis_points: terms.discount_basis_points,
+                    mfn: terms.mfn,
+                    settlement: settlement.as_str().to_owned(),
+                }
+            }
             Event::MfnElected { target, source } => Self::MfnElected {
                 target: target.to_string(),
                 source: source.to_string(),
@@ -219,6 +300,23 @@ impl EventDto {
             Event::ExitApproved { proceeds } => Self::ExitApproved {
                 proceeds_micros: proceeds.value().to_string(),
             },
+            Event::SafeRoundOpened { mandate } => Self::SafeRoundOpened {
+                mandate: MandateDto::from_mandate(mandate),
+            },
+            Event::SafeSubscribed {
+                instrument,
+                holder,
+                key,
+                purchase,
+                settlement,
+            } => Self::SafeSubscribed {
+                instrument: instrument.to_string(),
+                holder: holder.to_string(),
+                key: hex::encode(key.as_bytes()),
+                purchase_micros: purchase.value().to_string(),
+                settlement: settlement.as_str().to_owned(),
+            },
+            Event::SafeRoundEnded => Self::SafeRoundEnded,
             other => Self::Other {
                 description: format!("{other:?}"),
             },
@@ -399,6 +497,9 @@ pub enum ResponseDto {
     Rejected {
         reason: String,
     },
+    Round {
+        mandate: Option<MandateDto>,
+    },
 }
 
 impl ResponseDto {
@@ -447,6 +548,9 @@ impl ResponseDto {
             },
             Response::Rejected { reason } => Self::Rejected {
                 reason: reason.clone(),
+            },
+            Response::Round { mandate } => Self::Round {
+                mandate: mandate.as_ref().map(MandateDto::from_mandate),
             },
         }
     }

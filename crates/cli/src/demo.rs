@@ -1,5 +1,6 @@
-//! A fictional raise: a founder, two investors and an MFN clause that enforces
-//! itself. Every party signs with its own key and sees only what it may see.
+//! A fictional raise: a founder, two investors, an MFN clause that enforces
+//! itself and a round that runs without the founder. Every party signs with its
+//! own key and sees only what it may see.
 
 use undiluted_client::{
     AnchorRegistry, Client, ClientError, Party, PaymentRail, PayoutExecutor, Settlement, Transport,
@@ -8,9 +9,11 @@ use undiluted_domain::{
     CompanyId, HolderId, InstrumentId, MfnOffer, Money, Ownership, PayoutBasis, Ratio, Safe,
     SafeTerms, Shares,
 };
-use undiluted_ledger::{Event, PayoutDestination, SettlementReference, Treasury};
+use undiluted_ledger::{Event, PayoutDestination, RoundMandate, SettlementReference, Treasury};
 use undiluted_service::wire::AnchorOutput;
-use undiluted_service::{Actor, Command, PayoutInstruction, PayoutPlan, Response, Statement};
+use undiluted_service::{
+    Actor, Command, PayoutInstruction, PayoutPlan, Response, Statement, subscription_memo,
+};
 
 const MICROS_PER_DOLLAR: u128 = 1_000_000;
 const RATIO_PER_BASIS_POINT: u128 = 100_000_000_000_000;
@@ -21,6 +24,10 @@ const ANA_INVESTMENT: u128 = 2;
 const BEN_INVESTMENT: u128 = 3;
 const BEN_POST_MONEY_CAP: u128 = 30;
 const EXIT_PROCEEDS: u128 = 10;
+const ROUND_POST_MONEY_CAP: u128 = 30;
+const ROUND_MIN_CHECK: u128 = 1;
+const ROUND_MAX_RAISE: u128 = 5;
+const ROUND_CHECK: u128 = 1;
 /// A valid-looking transaction hash that does not exist.
 const INVENTED_PAYMENT: &str = "11111111111111111111111111111111";
 /// A real payment this small is then claimed to be ten times larger.
@@ -88,6 +95,7 @@ pub fn run<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor>(
     demo.raise()?;
     let offer = demo.discover_better_terms()?;
     demo.exercise_mfn(offer)?;
+    demo.run_round()?;
     demo.check_privacy()?;
     demo.check_history()?;
     demo.approve_exit()?;
@@ -288,6 +296,67 @@ impl<T: Transport, R: AnchorRegistry, P: PaymentRail, X: PayoutExecutor> Demo<T,
             &self.client.statement(&self.ana.party, self.ana.actor())?,
         );
         Ok(())
+    }
+
+    /// The founder sets the limits once; from then on the enclave records each
+    /// subscription that stays within them, without asking anyone.
+    fn run_round(&mut self) -> Result<(), ClientError> {
+        if !self.rail.attaches_memos() {
+            step("The autonomous round is skipped: this payment rail cannot attach a memo");
+            println!("  The web app runs it on testnet with direct token transfers.");
+            return Ok(());
+        }
+        step(&format!(
+            "The founder opens a round once: a ${ROUND_POST_MONEY_CAP} cap, checks of ${ROUND_MIN_CHECK} to ${ROUND_MAX_RAISE} in total. No approval is needed after this"
+        ));
+        let mandate = RoundMandate::new(
+            SafeTerms::new(Some(usd(ROUND_POST_MONEY_CAP)), None, false)?,
+            usd(ROUND_MIN_CHECK),
+            usd(ROUND_MAX_RAISE),
+        )?;
+        self.commit_as_company(Event::SafeRoundOpened { mandate })?;
+
+        step("Ben invests more on his own. His payment's memo names his key");
+        let memo = subscription_memo(&self.company_id, &self.ben.party.public_key());
+        let settlement = self.rail.pay_with_memo(usd(ROUND_CHECK), &memo)?;
+        println!("  Paid with memo {memo}");
+
+        step("Someone watching the treasury tries to claim Ben's payment as their own");
+        let thief = Member::new("eve")?;
+        let stolen = subscription(&thief, &settlement)?;
+        match self.client.propose(&thief.party, thief.actor(), stolen) {
+            Err(ClientError::Enclave(reason)) => {
+                println!("  Refused by the enclave: {}", shorten(&reason));
+            }
+            other => {
+                return Err(ClientError::Protocol(format!(
+                    "the stolen payment was not refused: {other:?}"
+                )));
+            }
+        }
+
+        step("Ben signs his subscription and the enclave records it. The founder did nothing");
+        let event = subscription(&self.ben, &settlement)?;
+        let proposal = self
+            .client
+            .propose(&self.ben.party, self.ben.actor(), event)?;
+        let committed = self.client.send(
+            &self.ben.party,
+            self.ben.actor(),
+            Command::Sign {
+                digest: proposal.digest,
+                signature: self.ben.party.sign(&proposal.digest),
+            },
+        )?;
+        expect(matches!(committed, Response::Committed { .. }), &committed)?;
+        self.publish_anchors()?;
+        print_statement(
+            "Ben",
+            &self.client.statement(&self.ben.party, self.ben.actor())?,
+        );
+
+        step("The founder closes the round");
+        self.commit_as_company(Event::SafeRoundEnded)
     }
 
     fn check_privacy(&mut self) -> Result<(), ClientError> {
@@ -529,6 +598,17 @@ fn issue_safe(
         holder: holder.id.clone(),
         safe: Safe::new(settlement.received, terms)?,
         settlement: SettlementReference::new(settlement.reference)?,
+    })
+}
+
+/// A SAFE `holder` takes under the open round, paid by `settlement`.
+fn subscription(holder: &Member, settlement: &Settlement) -> Result<Event, ClientError> {
+    Ok(Event::SafeSubscribed {
+        instrument: InstrumentId::new(format!("round-{}", holder.id))?,
+        holder: holder.id.clone(),
+        key: holder.party.public_key(),
+        purchase: settlement.received,
+        settlement: SettlementReference::new(settlement.reference.clone())?,
     })
 }
 

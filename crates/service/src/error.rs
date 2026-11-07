@@ -18,7 +18,7 @@ pub enum ServiceError {
     CompanyExists,
     #[error("this company does not exist")]
     UnknownCompany,
-    #[error("you can only review and sign your invitation until it is recorded")]
+    #[error("until you are on the cap table, you can only review, sign or withdraw what adds you")]
     NotYetRegistered,
     #[error("this actor may not do that")]
     Forbidden,
@@ -40,6 +40,10 @@ pub enum ServiceError {
     SettlementUnconfirmed(String),
     #[error("the payment does not match: the treasury did not receive this amount of this token")]
     SettlementMismatch,
+    #[error(
+        "a subscription must be paid with the memo {expected}, so nobody else can claim the payment"
+    )]
+    SubscriptionMemoMissing { expected: String },
     #[error("no exit has been approved")]
     NoExit,
     #[error("a payout has no destination")]

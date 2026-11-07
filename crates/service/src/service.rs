@@ -5,12 +5,12 @@ use undiluted_ledger::{
     SettlementReference, SignatureBytes,
 };
 
-use crate::chain::ChainReader;
+use crate::chain::{ChainReader, TokenTransfer};
 use crate::error::ServiceError;
 use crate::ports::{EnclaveSigner, Store};
 use crate::protocol::{
     Actor, Command, CompanyView, HeadAttestation, HolderExit, PayoutInstruction, PayoutPlan,
-    ProposalView, Reply, Response, SignedRequest, Statement,
+    ProposalView, Reply, Response, SignedRequest, Statement, subscription_memo,
 };
 
 /// An event collecting signatures. Only one can be open per company because
@@ -104,6 +104,14 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         }
 
         let ledger = self.load_ledger(&request.company)?;
+        if matches!(request.command, Command::GetRound) {
+            return Ok((
+                Response::Round {
+                    mandate: ledger.open_round().map(|round| round.mandate),
+                },
+                None,
+            ));
+        }
         let proposal = self.load_proposal(&request.company)?;
         Self::authenticate(request, &ledger, proposal.as_ref())?;
 
@@ -122,6 +130,7 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
             Command::GetCapTable => Self::read_table(request, &ledger).map(|r| (r, None)),
             Command::GetStatement => Self::read_statement(request, &ledger).map(|r| (r, None)),
             Command::GetPayoutPlan => self.payout_plan(request, &ledger).map(|r| (r, None)),
+            Command::GetRound => Err(ServiceError::Forbidden),
         }
     }
 
@@ -161,7 +170,7 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         };
         let key = match registered {
             Some(key) => key,
-            None => Self::invited_key(request, proposal)?,
+            None => Self::introduced_key(request, proposal)?,
         };
         if key.verifies(&request.digest()?, &request.signature) {
             Ok(())
@@ -170,27 +179,34 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         }
     }
 
-    /// Someone being invited has a key in the open proposal but is not a holder
-    /// until it commits. Until then they may only read and sign that invitation.
-    fn invited_key(
+    /// Someone not yet on the cap table proves a key that an event brings in:
+    /// the subscription they are proposing, or the open proposal that adds them.
+    /// Until it commits they may only review, sign or withdraw it.
+    fn introduced_key(
         request: &SignedRequest,
         proposal: Option<&Proposal>,
     ) -> Result<PublicKey, ServiceError> {
         let Actor::Holder(holder) = &request.actor else {
             return Err(ServiceError::InvalidSignature);
         };
-        let Some(Event::HolderRegistered {
-            holder: invited,
-            key,
-        }) = proposal.map(|open| &open.event)
-        else {
+        if let Command::Propose { event } = &request.command
+            && let Event::SafeSubscribed {
+                holder: subscriber,
+                key,
+                ..
+            } = event
+            && subscriber == holder
+        {
+            return Ok(*key);
+        }
+        let Some((introduced, key)) = proposal.and_then(|open| open.event.introduced_key()) else {
             return Err(ServiceError::InvalidSignature);
         };
-        if invited != holder {
+        if introduced != holder {
             return Err(ServiceError::InvalidSignature);
         }
         match request.command {
-            Command::GetProposal | Command::Sign { .. } => Ok(*key),
+            Command::GetProposal | Command::Sign { .. } | Command::CancelProposal => Ok(*key),
             _ => Err(ServiceError::NotYetRegistered),
         }
     }
@@ -207,7 +223,7 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         }
         let draft = ledger.draft(event.clone())?;
         Self::ensure_may_propose(&request.actor, &draft)?;
-        self.verify_settlement(ledger, &draft.event)?;
+        self.verify_settlement(&request.company, ledger, &draft.event)?;
 
         let proposal = Proposal {
             proposer: request.actor.clone(),
@@ -225,13 +241,20 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
 
     /// A SAFE needs a real payment: the token's own contract must have recorded
     /// this exact amount arriving at the treasury, and no other instrument of any
-    /// company in this enclave may already rely on the same payment.
-    fn verify_settlement(&self, ledger: &Ledger, event: &Event) -> Result<(), ServiceError> {
-        let Event::SafeIssued {
-            safe, settlement, ..
-        } = event
-        else {
+    /// company in this enclave may already rely on the same payment. With no
+    /// company approving a subscription, its payment must also name the key.
+    fn verify_settlement(
+        &self,
+        company: &CompanyId,
+        ledger: &Ledger,
+        event: &Event,
+    ) -> Result<(), ServiceError> {
+        let Some((settlement, amount)) = event.settlement() else {
             return Ok(());
+        };
+        let memo = match event {
+            Event::SafeSubscribed { key, .. } => Some(subscription_memo(company, key)),
+            _ => None,
         };
         let treasury = ledger.treasury().ok_or(ServiceError::NoTreasury)?;
         if self.store.get(&settlement_key(settlement))?.is_some() {
@@ -241,22 +264,33 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
             .chain
             .token_transfers(settlement.as_str())
             .map_err(|error| ServiceError::SettlementUnconfirmed(error.to_string()))?;
-        let arrived = transfers.iter().any(|transfer| {
-            transfer.token == treasury.token()
-                && transfer.to == treasury.account()
-                && transfer.amount == safe.purchase_amount()
-        });
-        if arrived {
-            Ok(())
-        } else {
-            Err(ServiceError::SettlementMismatch)
+        let arrivals: Vec<&TokenTransfer> = transfers
+            .iter()
+            .filter(|transfer| {
+                transfer.token == treasury.token()
+                    && transfer.to == treasury.account()
+                    && transfer.amount == amount
+            })
+            .collect();
+        if arrivals.is_empty() {
+            return Err(ServiceError::SettlementMismatch);
+        }
+        match memo {
+            Some(expected)
+                if !arrivals
+                    .iter()
+                    .any(|transfer| transfer.memo.as_deref() == Some(expected.as_str())) =>
+            {
+                Err(ServiceError::SubscriptionMemoMissing { expected })
+            }
+            _ => Ok(()),
         }
     }
 
     /// Claims a payment for this entry. A retry of the same entry may claim it
     /// again, which keeps a run that failed halfway from locking the payment.
     fn claim_settlement(&mut self, entry: &Entry, digest: &Digest) -> Result<(), ServiceError> {
-        let Event::SafeIssued { settlement, .. } = &entry.event else {
+        let Some((settlement, _)) = entry.event.settlement() else {
             return Ok(());
         };
         let key = settlement_key(settlement);
@@ -270,14 +304,17 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
     }
 
     /// The company proposes anything; a holder only what is theirs alone to
-    /// decide: an MFN election or where they get paid.
+    /// decide: an MFN election, where they get paid, or a subscription to the
+    /// open round.
     fn ensure_may_propose(actor: &Actor, draft: &Draft) -> Result<(), ServiceError> {
         match actor {
             Actor::Company => Ok(()),
             Actor::Holder(holder)
                 if matches!(
                     draft.event,
-                    Event::MfnElected { .. } | Event::PayoutDestinationSet { .. }
+                    Event::MfnElected { .. }
+                        | Event::PayoutDestinationSet { .. }
+                        | Event::SafeSubscribed { .. }
                 ) && draft.required_holders.contains(holder) =>
             {
                 Ok(())

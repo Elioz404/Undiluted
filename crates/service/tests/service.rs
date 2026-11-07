@@ -5,11 +5,12 @@ use undiluted_domain::{
     CompanyId, HolderId, InstrumentId, Money, Ownership, Ratio, Safe, SafeTerms, Shares,
 };
 use undiluted_ledger::{
-    Digest, Event, PayoutDestination, PublicKey, SettlementReference, SignatureBytes, Treasury,
+    Digest, Event, PayoutDestination, PublicKey, RoundMandate, SettlementReference, SignatureBytes,
+    Treasury,
 };
 use undiluted_service::{
     Actor, ChainError, ChainReader, Command, EnclaveSigner, MemoryStore, PayoutInstruction, Reply,
-    Response, Service, SignedRequest, StoreError, TokenTransfer,
+    Response, Service, SignedRequest, StoreError, TokenTransfer, subscription_memo,
 };
 
 const COMPANY_SEED: u8 = 1;
@@ -33,13 +34,18 @@ impl EnclaveSigner for TestSigner {
 const TREASURY: &str = "treasury.near";
 const TOKEN: &str = "usdc.near";
 
-/// A chain where a reference spells out what it paid: `<token>:<to>:<amount>:<id>`.
+/// A chain where a reference spells out what it paid: `<token>:<to>:<amount>:<id>`,
+/// then `#<memo>` if the transfer carried one.
 #[derive(Debug)]
 struct TestChain;
 
 impl ChainReader for TestChain {
     fn token_transfers(&self, reference: &str) -> Result<Vec<TokenTransfer>, ChainError> {
-        let parts: Vec<&str> = reference.split(':').collect();
+        let (payment, memo) = match reference.split_once('#') {
+            Some((payment, memo)) => (payment, Some(memo.to_owned())),
+            None => (reference, None),
+        };
+        let parts: Vec<&str> = payment.split(':').collect();
         let [token, to, amount, _] = parts[..] else {
             return Err(ChainError::Unavailable("no such transaction".to_owned()));
         };
@@ -47,6 +53,7 @@ impl ChainReader for TestChain {
             token: token.to_owned(),
             to: to.to_owned(),
             amount: Money::new(amount.parse().unwrap()),
+            memo,
         }])
     }
 }
@@ -346,7 +353,7 @@ fn an_invited_holder_sees_nothing_else_until_registered() {
         let reply = harness.send(MALLORY_SEED, Actor::Holder(holder("eve")), command);
         assert_eq!(
             rejected(&reply),
-            "you can only review and sign your invitation until it is recorded"
+            "until you are on the cap table, you can only review, sign or withdraw what adds you"
         );
     }
 }
@@ -763,5 +770,185 @@ fn a_safe_needs_a_treasury_to_check_against() {
     assert_eq!(
         reason,
         "no treasury has been set, so the payment cannot be checked"
+    );
+}
+
+const CAROL_SEED: u8 = 4;
+
+fn round_mandate() -> RoundMandate {
+    RoundMandate::new(
+        SafeTerms::new(Some(usd(10_000_000)), None, false).unwrap(),
+        usd(1_000),
+        usd(1_000_000),
+    )
+    .unwrap()
+}
+
+/// Ana and Ben as in `seeded`, with a round open that anyone may join.
+fn round_open() -> Harness {
+    let mut harness = seeded();
+    let digest = harness.propose(Event::SafeRoundOpened {
+        mandate: round_mandate(),
+    });
+    let reply = harness.send(
+        COMPANY_SEED,
+        Actor::Company,
+        Command::Sign {
+            digest,
+            signature: sign_digest(COMPANY_SEED, &digest),
+        },
+    );
+    assert!(matches!(reply.response, Response::Committed { .. }));
+    harness
+}
+
+/// A payment of `purchase` whose transfer carries `memo`.
+fn paid_with_memo(id: &str, purchase: u128, memo: &str) -> String {
+    format!("{}#{memo}", paid_reference(id, purchase))
+}
+
+fn subscription(owner: &str, seed: u8, purchase: u128, reference: &str) -> Event {
+    Event::SafeSubscribed {
+        instrument: instrument(&format!("safe-{owner}")),
+        holder: holder(owner),
+        key: public(seed),
+        purchase: usd(purchase),
+        settlement: SettlementReference::new(reference).unwrap(),
+    }
+}
+
+fn subscribe(harness: &mut Harness, owner: &str, seed: u8, event: Event) -> Reply {
+    harness.send(
+        seed,
+        Actor::Holder(holder(owner)),
+        Command::Propose { event },
+    )
+}
+
+#[test]
+fn a_new_investor_subscribes_alone_and_joins_the_cap_table() {
+    let mut harness = round_open();
+    let memo = subscription_memo(&harness.company, &public(CAROL_SEED));
+    let event = subscription(
+        "carol",
+        CAROL_SEED,
+        50_000,
+        &paid_with_memo("carol", 50_000, &memo),
+    );
+
+    let Response::Proposal(view) = subscribe(&mut harness, "carol", CAROL_SEED, event).response
+    else {
+        panic!("expected a proposal");
+    };
+    assert!(!view.company_signature_missing);
+    assert_eq!(view.holder_signatures_missing, vec![holder("carol")]);
+
+    let reply = harness.send(
+        CAROL_SEED,
+        Actor::Holder(holder("carol")),
+        Command::Sign {
+            digest: view.digest,
+            signature: sign_digest(CAROL_SEED, &view.digest),
+        },
+    );
+    assert!(
+        matches!(reply.response, Response::Committed { .. }),
+        "{reply:?}"
+    );
+    let statement = harness.statement("carol", CAROL_SEED);
+    assert_eq!(statement.lines.len(), 1);
+    assert!(statement.reconciles);
+}
+
+#[test]
+fn a_subscription_paid_without_its_memo_is_refused() {
+    let mut harness = round_open();
+    let event = subscription(
+        "carol",
+        CAROL_SEED,
+        50_000,
+        &paid_reference("carol", 50_000),
+    );
+    let reply = subscribe(&mut harness, "carol", CAROL_SEED, event);
+    assert!(
+        rejected(&reply).starts_with("a subscription must be paid with the memo undiluted:acme:")
+    );
+}
+
+#[test]
+fn nobody_can_claim_a_payment_that_names_another_key() {
+    let mut harness = round_open();
+    let carols_memo = subscription_memo(&harness.company, &public(CAROL_SEED));
+    let carols_payment = paid_with_memo("carol", 50_000, &carols_memo);
+
+    let stolen = subscription("mallory", MALLORY_SEED, 50_000, &carols_payment);
+    let reply = subscribe(&mut harness, "mallory", MALLORY_SEED, stolen);
+    assert!(rejected(&reply).starts_with("a subscription must be paid with the memo"));
+}
+
+#[test]
+fn nobody_can_subscribe_in_someone_elses_name() {
+    let mut harness = round_open();
+    let memo = subscription_memo(&harness.company, &public(CAROL_SEED));
+    let event = subscription(
+        "carol",
+        CAROL_SEED,
+        50_000,
+        &paid_with_memo("carol", 50_000, &memo),
+    );
+    let reply = subscribe(&mut harness, "carol", MALLORY_SEED, event);
+    assert_eq!(rejected(&reply), "request signature is invalid");
+}
+
+#[test]
+fn a_subscriber_can_only_review_sign_or_withdraw_until_recorded() {
+    let mut harness = round_open();
+    let memo = subscription_memo(&harness.company, &public(CAROL_SEED));
+    let event = subscription(
+        "carol",
+        CAROL_SEED,
+        50_000,
+        &paid_with_memo("carol", 50_000, &memo),
+    );
+    subscribe(&mut harness, "carol", CAROL_SEED, event);
+
+    let carol = Actor::Holder(holder("carol"));
+    let reply = harness.send(CAROL_SEED, carol.clone(), Command::GetStatement);
+    assert_eq!(
+        rejected(&reply),
+        "until you are on the cap table, you can only review, sign or withdraw what adds you"
+    );
+    let reply = harness.send(CAROL_SEED, carol, Command::CancelProposal);
+    assert!(matches!(reply.response, Response::Cancelled));
+}
+
+#[test]
+fn a_subscription_without_an_open_round_is_refused() {
+    let mut harness = seeded();
+    let memo = subscription_memo(&harness.company, &public(CAROL_SEED));
+    let event = subscription(
+        "carol",
+        CAROL_SEED,
+        50_000,
+        &paid_with_memo("carol", 50_000, &memo),
+    );
+    let reply = subscribe(&mut harness, "carol", CAROL_SEED, event);
+    assert_eq!(rejected(&reply), "no round is open");
+}
+
+#[test]
+fn anyone_reads_the_round_terms_but_not_what_was_raised() {
+    let mut harness = seeded();
+    let stranger = Actor::Holder(holder("stranger"));
+    let reply = harness.send(MALLORY_SEED, stranger.clone(), Command::GetRound);
+    assert_eq!(reply.response, Response::Round { mandate: None });
+
+    let mut harness = round_open();
+    let reply = harness.send(MALLORY_SEED, stranger, Command::GetRound);
+    assert_eq!(
+        reply.response,
+        Response::Round {
+            mandate: Some(round_mandate())
+        }
     );
 }
