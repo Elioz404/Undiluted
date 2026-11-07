@@ -39,6 +39,12 @@ pub trait ChainReader {
 pub fn parse_transfers(transaction: &str) -> Result<Vec<TokenTransfer>, ChainError> {
     let parsed: Value = serde_json::from_str(transaction)
         .map_err(|error| ChainError::Unavailable(format!("unreadable transaction: {error}")))?;
+    if let Some(error) = parsed.get("error") {
+        let name = error["cause"]["name"].as_str().unwrap_or("unknown error");
+        return Err(ChainError::Unavailable(format!(
+            "no such transaction ({name})"
+        )));
+    }
     let transaction = parsed.get("result").unwrap_or(&parsed);
     if transaction["final_execution_status"] != FINAL {
         return Err(ChainError::NotFinal);
@@ -168,6 +174,19 @@ mod tests {
     fn a_transaction_that_is_not_final_yet_does_not_count() {
         let tx = json!({ "final_execution_status": "EXECUTED_OPTIMISTIC", "receipts_outcome": [] });
         assert_eq!(parse_transfers(&tx.to_string()), Err(ChainError::NotFinal));
+    }
+
+    #[test]
+    fn an_rpc_error_is_not_mistaken_for_a_pending_transaction() {
+        let missing = json!({
+            "error": { "cause": { "name": "UNKNOWN_TRANSACTION" }, "code": -32000 },
+        });
+        assert_eq!(
+            parse_transfers(&missing.to_string()),
+            Err(ChainError::Unavailable(
+                "no such transaction (UNKNOWN_TRANSACTION)".to_owned()
+            ))
+        );
     }
 
     #[test]

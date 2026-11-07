@@ -2,6 +2,7 @@
 
 use outlayer::storage::sealed;
 use outlayer::{env, signing_keys};
+use serde_json::json;
 use undiluted_ledger::{PublicKey, SignatureBytes};
 use undiluted_service::{
     ChainError, ChainReader, EnclaveSigner, Store, StoreError, TokenTransfer, parse_transfers,
@@ -83,14 +84,21 @@ impl ChainReader for NearChain {
     }
 }
 
+/// Asks through a raw JSON-RPC call, because the dedicated host call does not
+/// pass `wait_until` on and so waits for a transaction that may never exist.
 fn lookup(
     reference: &str,
     sender: &str,
     wait_until: &str,
 ) -> Result<Vec<TokenTransfer>, ChainError> {
-    let (transaction, error) = near::rpc::api::tx_status(reference, sender, wait_until);
+    let params = json!({
+        "tx_hash": reference,
+        "sender_account_id": sender,
+        "wait_until": wait_until,
+    });
+    let (response, error) = near::rpc::api::raw("tx", &params.to_string());
     if !error.is_empty() {
         return Err(ChainError::Unavailable(error));
     }
-    parse_transfers(&transaction)
+    parse_transfers(&response)
 }
