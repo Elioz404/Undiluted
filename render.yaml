@@ -1,0 +1,47 @@
+# The web app and its relay as one Render web service, built from the Dockerfile.
+# RELAY_PRIVATE_KEY is the only secret: Render asks for it when the blueprint is
+# applied, and it never lives in this repository.
+services:
+  - type: web
+    name: undiluted
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/config
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: NEAR_RPC_URL
+        value: https://rpc.testnet.fastnear.com
+      - key: NEAR_NETWORK
+        value: testnet
+      - key: RELAY_ACCOUNT
+        value: undiluted-dev.testnet
+      - key: RELAY_SIGNER
+        value: key
+      - key: RELAY_PRIVATE_KEY
+        sync: false
+      - key: OUTLAYER_CONTRACT
+        value: outlayer.testnet
+      - key: ENCLAVE_PROJECT
+        value: undiluted-dev.testnet/undiluted
+      - key: SECRETS_ACCOUNT
+        value: undiluted-dev.testnet
+      - key: SECRETS_PROFILE
+        value: default
+      - key: ANCHOR_CONTRACT
+        value: anchor.undiluted-dev.testnet
+      - key: DISTRIBUTION_CONTRACT
+        value: distribution.undiluted-dev.testnet
+      - key: TREASURY_ACCOUNT
+        value: treasury.undiluted-dev.testnet
+      - key: PAYMENT_API
+        value: https://www.usetidepool.tech
+      - key: ORIGIN_ASSET
+        value: nep141:usdt.tidepool-sandbox.testnet
+      - key: DESTINATION_ASSET
+        value: nep141:usdc.tidepool-sandbox.testnet
+      - key: MAX_PAYMENT_MICROS
+        value: "5000000"
+      - key: MAX_EXIT_MICROS
+        value: "10000000"
