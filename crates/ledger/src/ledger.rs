@@ -68,6 +68,11 @@ impl Ledger {
         self.state.holder_keys.get(holder).copied()
     }
 
+    /// Every registered holder, whether or not anything was issued to them yet.
+    pub fn holders(&self) -> impl Iterator<Item = &HolderId> {
+        self.state.holder_keys.keys()
+    }
+
     #[must_use]
     pub fn payout_destination(&self, holder: &HolderId) -> Option<&PayoutDestination> {
         self.state.payout_destinations.get(holder)

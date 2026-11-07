@@ -62,8 +62,7 @@ export function Company({ company }: { company: string }) {
     });
   }
 
-  const holders = (table?.lines ?? []).map((line) => line.holder);
-  const registered = new Set(holders);
+  const registered = new Set(table?.holders ?? []);
 
   return (
     <main className="page">

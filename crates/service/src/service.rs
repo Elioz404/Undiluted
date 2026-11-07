@@ -394,6 +394,7 @@ impl<S: Store, K: EnclaveSigner, C: ChainReader> Service<S, K, C> {
         Ok(Response::CapTable(CompanyView {
             head: ledger.head(),
             entries: ledger.entries().len() as u64,
+            holders: ledger.holders().cloned().collect(),
             pro_forma: ledger.table().pro_forma()?,
         }))
     }

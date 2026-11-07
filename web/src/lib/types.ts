@@ -86,6 +86,7 @@ export type Response =
       kind: "cap_table";
       head: string;
       entries: number;
+      holders: string[];
       capitalization: string;
       option_pool: string;
       lines: Line[];

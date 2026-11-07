@@ -386,6 +386,7 @@ pub enum ResponseDto {
     CapTable {
         head: String,
         entries: u64,
+        holders: Vec<String>,
         capitalization: String,
         option_pool: String,
         lines: Vec<LineDto>,
@@ -418,6 +419,7 @@ impl ResponseDto {
             Response::CapTable(view) => Self::CapTable {
                 head: hex::encode(view.head.as_bytes()),
                 entries: view.entries,
+                holders: view.holders.iter().map(ToString::to_string).collect(),
                 capitalization: view.pro_forma.capitalization.value().to_string(),
                 option_pool: view.pro_forma.option_pool.value().to_string(),
                 lines: view

@@ -94,6 +94,7 @@ pub struct ProposalView {
 pub struct CompanyView {
     pub head: Digest,
     pub entries: u64,
+    pub holders: Vec<undiluted_domain::HolderId>,
     pub pro_forma: ProForma,
 }
 
