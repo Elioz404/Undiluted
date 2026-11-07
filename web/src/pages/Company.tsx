@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { ActionPanel, Empty, Field, Notice, PageHeader, Pending, Sheet, Skeleton, useAction } from "../components/ui.tsx";
+import { RoundTerms } from "../components/RoundTerms.tsx";
 import { Verify } from "../components/Verify.tsx";
 import { describe, dollars, percent, toMicros } from "../lib/format.ts";
 import { companyKey, joinRequests, payments, type JoinRequest } from "../lib/keys.ts";
 import { enclaveIdentity, Session } from "../lib/protocol.ts";
 import { relay } from "../lib/relay.ts";
-import type { Line, Proposal, Response } from "../lib/types.ts";
+import type { Line, Mandate, Proposal, Response } from "../lib/types.ts";
 
 type Table = Extract<Response, { kind: "cap_table" }>;
 type Propose = (event: Parameters<Session["commit"]>[1], label: string) => Promise<void>;
@@ -21,6 +22,7 @@ export function Company({ company }: { company: string }) {
   const { busy, run, status } = useAction();
   const [table, setTable] = useState<Table | null>(null);
   const [proposal, setProposal] = useState<Proposal | null>(null);
+  const [round, setRound] = useState<Mandate | null>(null);
   const [joins, setJoins] = useState<JoinRequest[]>(() => joinRequests(company));
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -42,6 +44,8 @@ export function Company({ company }: { company: string }) {
     await run("Reading the cap table", async () => {
       const response = await send({ kind: "get_cap_table" });
       if (response.kind === "cap_table") setTable(response);
+      const current = await send({ kind: "get_round" });
+      if (current.kind === "round") setRound(current.mandate);
       const pending = await session.send({ role: "company" }, { kind: "get_proposal" }, await companyKey(company));
       setProposal(pending.kind === "proposal" ? pending : null);
     });
@@ -131,8 +135,13 @@ export function Company({ company }: { company: string }) {
               content: <Investors company={company} joins={joins} registered={registered} disabled={blocked} propose={propose} />,
             },
             {
+              id: "round",
+              label: "Round",
+              content: <Round round={round} disabled={blocked} propose={propose} />,
+            },
+            {
               id: "safe",
-              label: "Issue SAFE",
+              label: "SAFE",
               content: <IssueSafe company={company} registered={registered} disabled={blocked} propose={propose} />,
             },
             {
@@ -233,6 +242,69 @@ function Investors({
           );
         })}
       </ul>
+    </>
+  );
+}
+
+/**
+ * The company sets a round's limits once. From then on investors join on their
+ * own and the enclave records each SAFE that stays within them.
+ */
+function Round({ round, disabled, propose }: { round: Mandate | null; disabled: boolean; propose: Propose }) {
+  const [cap, setCap] = useState("30");
+  const [mfn, setMfn] = useState(false);
+  const [minimum, setMinimum] = useState("1");
+  const [size, setSize] = useState("5");
+  const [problem, setProblem] = useState<string | null>(null);
+
+  if (round) {
+    return (
+      <>
+        <RoundTerms mandate={round} />
+        <p className="hint">
+          Investors join from their own view: they pay, sign, and the enclave records each SAFE that stays within these limits. You approve nothing.
+        </p>
+        <button type="button" className="btn" disabled={disabled} onClick={() => propose({ kind: "safe_round_ended" }, "Ending the round")}>
+          End the round
+        </button>
+      </>
+    );
+  }
+
+  function open() {
+    try {
+      const mandate: Mandate = {
+        terms: { valuation_cap_micros: cap.trim() ? toMicros(cap) : null, discount_basis_points: null, mfn },
+        min_check_micros: toMicros(minimum),
+        max_raise_micros: toMicros(size),
+      };
+      setProblem(null);
+      void propose({ kind: "safe_round_opened", mandate }, "Opening the round");
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return (
+    <>
+      <p className="hint">Set the limits once. After that, the round runs without you.</p>
+      <Field label="Post-money valuation cap ($)" hint="Leave empty for an uncapped SAFE.">
+        <input value={cap} inputMode="decimal" onChange={(event) => setCap(event.target.value)} />
+      </Field>
+      <label className="check">
+        <input type="checkbox" checked={mfn} onChange={(event) => setMfn(event.target.checked)} />
+        Most favored nation clause
+      </label>
+      <Field label="Smallest check ($)">
+        <input value={minimum} inputMode="decimal" onChange={(event) => setMinimum(event.target.value)} />
+      </Field>
+      <Field label="Round size ($)" hint="Subscriptions stop once this much has come in.">
+        <input value={size} inputMode="decimal" onChange={(event) => setSize(event.target.value)} />
+      </Field>
+      {problem && <Notice tone="bad">{problem}</Notice>}
+      <button type="button" className="btn btn-ink" disabled={disabled} onClick={open}>
+        Open the round
+      </button>
     </>
   );
 }

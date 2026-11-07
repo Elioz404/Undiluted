@@ -44,9 +44,12 @@ export interface Tab {
   content: ReactNode;
 }
 
-/** The things to do on a view, one at a time. */
+/**
+ * The things to do on a view, one at a time. Until someone picks a tab, the
+ * first one shows, so a tab that appears once data loads can lead.
+ */
 export function ActionPanel({ title, tabs }: { title: string; tabs: Tab[] }) {
-  const [current, setCurrent] = useState(tabs[0]?.id);
+  const [current, setCurrent] = useState<string | null>(null);
   const shown = tabs.find((tab) => tab.id === current) ?? tabs[0];
   const id = useId();
   return (

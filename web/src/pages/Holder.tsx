@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { ActionPanel, Empty, Field, Notice, PageHeader, Pending, Sheet, Skeleton, useAction, type Tab } from "../components/ui.tsx";
+import { RoundTerms } from "../components/RoundTerms.tsx";
 import { Verify } from "../components/Verify.tsx";
 import { describe, dollars, percent, toMicros } from "../lib/format.ts";
 import { holderKey, recordPayment, requestToJoin } from "../lib/keys.ts";
-import { publicKeyOf, Session } from "../lib/protocol.ts";
+import { memoFor, publicKeyOf, Session } from "../lib/protocol.ts";
 import { relay } from "../lib/relay.ts";
-import type { Command, Proposal, Statement } from "../lib/types.ts";
+import type { Command, Mandate, Proposal, Statement } from "../lib/types.ts";
 
 type Event = Parameters<Session["commit"]>[1];
 
@@ -16,6 +17,7 @@ export function Holder({ company, holder }: { company: string; holder: string })
   const { busy, run, status } = useAction();
   const [statement, setStatement] = useState<Statement | null>(null);
   const [proposal, setProposal] = useState<Proposal | null>(null);
+  const [round, setRound] = useState<Mandate | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -29,6 +31,8 @@ export function Holder({ company, holder }: { company: string; holder: string })
       setProposal(pending.kind === "proposal" ? pending : null);
       const current = await send({ kind: "get_statement" });
       setStatement(current.kind === "statement" ? current : null);
+      const open = await send({ kind: "get_round" });
+      setRound(open.kind === "round" ? open.mandate : null);
       setLoaded(true);
     });
   }
@@ -67,6 +71,28 @@ export function Holder({ company, holder }: { company: string; holder: string })
     if (recorded) await refresh();
   }
 
+  /** Pays with a memo naming this key, then proposes and signs the SAFE. No one else acts. */
+  async function subscribe(micros: string) {
+    setNotice(null);
+    const recorded = await run("Paying and subscribing", async () => {
+      const secret = await holderKey(company, holder);
+      const settlement = await relay.paySubscription(micros, await memoFor(company, secret));
+      const event: Event = {
+        kind: "safe_subscribed",
+        instrument: `round-${holder}-${settlement.reference.slice(0, 6).toLowerCase()}`,
+        holder,
+        key: await publicKeyOf(secret),
+        purchase_micros: settlement.receivedMicros,
+        settlement: settlement.reference,
+      };
+      const response = await session.commit({ actor, secret }, event, [{ actor, secret }]);
+      if (response.kind === "rejected") throw new Error(response.reason);
+      setNotice(`You are in: a ${dollars(settlement.receivedMicros)} SAFE, recorded and anchored on NEAR. Nobody had to approve it.`);
+      return true;
+    });
+    if (recorded) await refresh();
+  }
+
   async function pay(micros: string) {
     setNotice(null);
     await run("Paying into the company's treasury", async () => {
@@ -77,11 +103,19 @@ export function Holder({ company, holder }: { company: string; holder: string })
   }
 
   const joined = statement !== null;
-  const tabs: Tab[] = [{ id: "invest", label: "Invest", content: <Invest disabled={busy || !joined} joined={loaded ? joined : null} onPay={pay} /> }];
+  const tabs: Tab[] = [];
+  if (round) {
+    tabs.push({
+      id: "round",
+      label: "Round",
+      content: <JoinRound round={round} disabled={busy || proposal !== null} onSubscribe={subscribe} />,
+    });
+  }
+  tabs.push({ id: "invest", label: "Invest", content: <Invest disabled={busy || !joined} joined={loaded ? joined : null} onPay={pay} /> });
   if (joined) {
     tabs.push({
       id: "payout",
-      label: "Payout account",
+      label: "Payout",
       content: <PayoutAccount holder={holder} disabled={busy || proposal !== null} act={act} />,
     });
   }
@@ -122,7 +156,9 @@ export function Holder({ company, holder }: { company: string; holder: string })
             <Skeleton />
           ) : !statement ? (
             <Empty title="Not on the cap table yet">
-              Your key was made in this browser and the company has your request. Once they add you and you sign, your position shows here.
+              {round
+                ? "This company has a round open. Join it from Next steps: you pay, you sign, and the enclave records your SAFE without anyone approving it."
+                : "Your key was made in this browser and the company has your request. Once they add you and you sign, your position shows here."}
             </Empty>
           ) : (
             <Position statement={statement} disabled={busy || proposal !== null} act={act} />
@@ -220,6 +256,37 @@ function Position({ statement, disabled, act }: { statement: Statement; disabled
 }
 
 /** `joined` is null while the position is still loading. */
+function JoinRound({ round, disabled, onSubscribe }: { round: Mandate; disabled: boolean; onSubscribe: (micros: string) => Promise<void> }) {
+  const [amount, setAmount] = useState(() => dollars(round.min_check_micros).slice(1));
+  const [problem, setProblem] = useState<string | null>(null);
+
+  function subscribe() {
+    try {
+      const micros = toMicros(amount);
+      setProblem(null);
+      void onSubscribe(micros);
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return (
+    <>
+      <RoundTerms mandate={round} />
+      <Field label="Your check ($)" hint="Test tokens on NEAR testnet. The relay pays them on your behalf.">
+        <input value={amount} inputMode="decimal" onChange={(event) => setAmount(event.target.value)} />
+      </Field>
+      {problem && <Notice tone="bad">{problem}</Notice>}
+      <button type="button" className="btn btn-ink" onClick={subscribe} disabled={disabled}>
+        Pay and subscribe
+      </button>
+      <p className="hint">
+        The payment carries a memo naming your key, so nobody else can claim it. The enclave checks it arrived and that the round has room.
+      </p>
+    </>
+  );
+}
+
 function Invest({ disabled, joined, onPay }: { disabled: boolean; joined: boolean | null; onPay: (micros: string) => Promise<void> }) {
   const [amount, setAmount] = useState("2");
   const [problem, setProblem] = useState<string | null>(null);

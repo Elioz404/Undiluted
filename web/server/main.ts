@@ -8,7 +8,7 @@ import { Anchors, Payouts, Tokens } from "./chain.ts";
 import { loadConfig, tokenContract } from "./config.ts";
 import { Enclave } from "./enclave.ts";
 import { CliSubmitter, KeySubmitter, Near, type Submitter } from "./near.ts";
-import { Payments } from "./payments.ts";
+import { Payments, Subscriptions } from "./payments.ts";
 import { apiRoutes } from "./routes.ts";
 
 const SETTLING = { checks: 20, intervalMs: 3000 };
@@ -45,6 +45,7 @@ app.use(
       payer: config.relayAccount,
       ...PAYMENT_POLLING,
     }),
+    subscriptions: new Subscriptions(tokens, tokenContract(config.destinationAsset), config.treasury),
     payouts: new Payouts(near, tokens, config.distributionContract, tokenContract(config.destinationAsset)),
   }),
 );

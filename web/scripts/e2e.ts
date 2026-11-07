@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { initSync } from "../src/wasm/undiluted_web.js";
-import { enclaveIdentity, generateKey, publicKeyOf, Session } from "../src/lib/protocol.ts";
+import { enclaveIdentity, generateKey, memoFor, publicKeyOf, Session } from "../src/lib/protocol.ts";
 import { relay, useRelayAt } from "../src/lib/relay.ts";
 import type { Actor, Event, Response } from "../src/lib/types.ts";
 
@@ -85,6 +85,42 @@ async function main() {
 
   step("ana's statement");
   expect(await session.send(ana.actor, { kind: "get_statement" }, ana.secret), "statement");
+
+  step("The company opens a round once; from here it approves nothing");
+  const mandate = {
+    terms: { valuation_cap_micros: "30000000", discount_basis_points: null, mfn: false },
+    min_check_micros: "1000000",
+    max_raise_micros: "5000000",
+  };
+  expect(await session.commit(asCompany, { kind: "safe_round_opened", mandate }, [asCompany]), "committed");
+  const ben = { actor: { role: "holder", holder: "ben" } as Actor, secret: await generateKey() };
+  expect(await session.send(ben.actor, { kind: "get_round" }, ben.secret), "round");
+
+  step("ben, never invited, pays with a memo naming his key");
+  const paid = await relay.paySubscription(PAYMENT_MICROS, await memoFor(company, ben.secret));
+  console.log(`  ${JSON.stringify(paid)}`);
+  const subscription = (holder: string, key: string): Event => ({
+    kind: "safe_subscribed",
+    instrument: `round-${holder}`,
+    holder,
+    key,
+    purchase_micros: paid.receivedMicros,
+    settlement: paid.reference,
+  });
+
+  step("Someone watching the treasury tries to claim ben's payment");
+  const eve = { actor: { role: "holder", holder: "eve" } as Actor, secret: await generateKey() };
+  const stolen = subscription("eve", await publicKeyOf(eve.secret));
+  expect(await session.send(eve.actor, { kind: "propose", event: stolen }, eve.secret), "rejected");
+
+  step("ben subscribes and signs; the enclave records it on its own");
+  const own = subscription("ben", await publicKeyOf(ben.secret));
+  expect(await session.commit(ben, own, [ben]), "committed");
+  const after = expect(await session.send(asCompany.actor, { kind: "get_cap_table" }, asCompany.secret), "cap_table");
+  if (after.kind !== "cap_table" || !after.holders.includes("ben")) {
+    throw new Error("ben is not on the cap table");
+  }
+  expect(await session.send(ben.actor, { kind: "get_statement" }, ben.secret), "statement");
 
   console.log("\nDone.");
 }

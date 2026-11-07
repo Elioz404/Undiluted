@@ -51,6 +51,31 @@ export function settlementFrom(answer: StatusAnswer): Settlement | null {
   return { reference, receivedMicros };
 }
 
+/** What a subscription memo looks like: `undiluted:<company>:<holder key>`. */
+const SUBSCRIPTION_MEMO = /^undiluted:[a-z0-9][a-z0-9_-]{1,62}:[0-9a-f]{64}$/;
+
+export function isSubscriptionMemo(memo: unknown): memo is string {
+  return typeof memo === "string" && SUBSCRIPTION_MEMO.test(memo);
+}
+
+/**
+ * Pays the treasury directly in its own token, with a memo that names the
+ * investor's key. A subscription needs that memo, and a cross-chain route
+ * cannot attach one, so the payment stays on NEAR.
+ */
+export class Subscriptions {
+  constructor(
+    private readonly tokens: Tokens,
+    private readonly token: string,
+    private readonly treasury: string,
+  ) {}
+
+  async pay(micros: bigint, memo: string): Promise<Settlement> {
+    const reference = await this.tokens.transfer(this.token, this.treasury, micros, memo);
+    return { reference, receivedMicros: micros.toString() };
+  }
+}
+
 export class Payments {
   constructor(
     private readonly tokens: Tokens,

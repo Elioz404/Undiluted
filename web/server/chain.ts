@@ -85,11 +85,12 @@ export class Tokens {
     });
   }
 
-  async transfer(token: string, receiver: string, micros: bigint): Promise<string> {
+  /** Sends `micros` of `token` and returns the hash of the final transaction. */
+  async transfer(token: string, receiver: string, micros: bigint, memo?: string): Promise<string> {
     const outcome = await this.near.call({
       contract: token,
       method: "ft_transfer",
-      args: { receiver_id: receiver, amount: micros.toString() },
+      args: { receiver_id: receiver, amount: micros.toString(), ...(memo ? { memo } : {}) },
       gas: CALL_GAS,
       deposit: ONE_YOCTO,
     });

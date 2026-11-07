@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { settlementFrom } from "./payments.ts";
+import { isSubscriptionMemo, settlementFrom } from "./payments.ts";
 
 test("a settled payment gives what the treasury received and where", () => {
   const answer = {
@@ -23,4 +23,14 @@ test("a refunded payment is a failure", () => {
 
 test("success without details is not trusted", () => {
   assert.throws(() => settlementFrom({ status: "SUCCESS", swapDetails: {} }));
+});
+
+test("a subscription memo names a company and a 32-byte key", () => {
+  assert.equal(isSubscriptionMemo(`undiluted:co-79c06201:${"ab".repeat(32)}`), true);
+});
+
+test("anything else is not a subscription memo", () => {
+  for (const memo of ["", "undiluted:co:short", `other:co-1:${"ab".repeat(32)}`, `undiluted:Co-1:${"ab".repeat(32)}`, 42]) {
+    assert.equal(isSubscriptionMemo(memo), false);
+  }
 });

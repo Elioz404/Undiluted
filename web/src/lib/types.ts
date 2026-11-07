@@ -2,6 +2,19 @@
 
 export type Actor = { role: "company" } | { role: "holder"; holder: string };
 
+export interface Terms {
+  valuation_cap_micros: string | null;
+  discount_basis_points: number | null;
+  mfn: boolean;
+}
+
+/** What a company authorized for its open round. */
+export interface Mandate {
+  terms: Terms;
+  min_check_micros: string;
+  max_raise_micros: string;
+}
+
 export type Event =
   | { kind: "treasury_designated"; account: string; token: string }
   | { kind: "holder_registered"; holder: string; key: string }
@@ -19,6 +32,16 @@ export type Event =
   | { kind: "mfn_elected"; target: string; source: string }
   | { kind: "payout_destination_set"; holder: string; destination: string }
   | { kind: "exit_approved"; proceeds_micros: string }
+  | { kind: "safe_round_opened"; mandate: Mandate }
+  | {
+      kind: "safe_subscribed";
+      instrument: string;
+      holder: string;
+      key: string;
+      purchase_micros: string;
+      settlement: string;
+    }
+  | { kind: "safe_round_ended" }
   | { kind: "other"; description: string };
 
 export type Command =
@@ -29,7 +52,8 @@ export type Command =
   | { kind: "get_proposal" }
   | { kind: "get_cap_table" }
   | { kind: "get_statement" }
-  | { kind: "get_payout_plan" };
+  | { kind: "get_payout_plan" }
+  | { kind: "get_round" };
 
 export interface Line {
   instrument: string;
@@ -93,7 +117,8 @@ export type Response =
     }
   | ({ kind: "statement" } & Statement)
   | { kind: "payout_plan"; proceeds_micros: string; instructions: Instruction[] }
-  | { kind: "rejected"; reason: string };
+  | { kind: "rejected"; reason: string }
+  | { kind: "round"; mandate: Mandate | null };
 
 export interface Anchor {
   company: string;

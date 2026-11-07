@@ -3,7 +3,7 @@
  * comes from the enclave all happen in the wasm build of the Rust client.
  */
 
-import init, { newParty, openReply, partyPublicKey, prepareRequest } from "../wasm/undiluted_web.js";
+import init, { newParty, openReply, partyPublicKey, prepareRequest, subscriptionMemo } from "../wasm/undiluted_web.js";
 import { relay, RelayError } from "./relay.ts";
 import type { Actor, Anchor, Command, EnclaveOutput, Event, Response } from "./types.ts";
 
@@ -33,6 +33,12 @@ export async function generateKey(): Promise<string> {
 export async function publicKeyOf(secret: string): Promise<string> {
   await ready();
   return partyPublicKey(secret);
+}
+
+/** The memo a payment needs to subscribe to `company`'s round with `secret`'s key. */
+export async function memoFor(company: string, secret: string): Promise<string> {
+  await ready();
+  return subscriptionMemo(company, partyPublicKey(secret));
 }
 
 /** Heads are published in order, so one that failed waits here for the next try. */

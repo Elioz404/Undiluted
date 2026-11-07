@@ -42,6 +42,7 @@ export const relay = {
   headAt: (company: string, sequence: number) =>
     request<{ head: string | null }>(`/anchors/${encodeURIComponent(company)}/${sequence}`),
   pay: (micros: string) => post<Settlement>("/payments", { micros }),
+  paySubscription: (micros: string, memo: string) => post<Settlement>("/payments/subscription", { micros, memo }),
   openPayouts: (company: string, enclaveKey: string, totalMicros: string) =>
     post("/payouts/open", { company, enclaveKey, totalMicros }),
   payOut: (company: string, instruction: Instruction) => post("/payouts/pay", { company, instruction }),

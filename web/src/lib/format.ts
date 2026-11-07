@@ -1,4 +1,4 @@
-import type { Event } from "./types.ts";
+import type { Event, Terms } from "./types.ts";
 
 const MICROS = 1_000_000n;
 
@@ -33,6 +33,17 @@ export function shortHex(hex: string): string {
   return `${hex.slice(0, 10)}…${hex.slice(-6)}`;
 }
 
+/** SAFE terms in a few words, e.g. "$30.00 post-money cap, MFN clause". */
+export function describeTerms(terms: Terms): string {
+  return [
+    terms.valuation_cap_micros ? `${dollars(terms.valuation_cap_micros)} post-money cap` : "no cap",
+    terms.discount_basis_points ? `${terms.discount_basis_points / 100}% discount` : null,
+    terms.mfn ? "MFN clause" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
 /** What a signer is being asked to approve, in plain words. */
 export function describe(event: Event): string {
   switch (event.kind) {
@@ -42,14 +53,14 @@ export function describe(event: Event): string {
       return `${event.holder} joins the cap table with key ${shortHex(event.key)}`;
     case "common_issued":
       return `${event.holder} receives ${Number(event.shares).toLocaleString()} common shares (${event.instrument})`;
-    case "safe_issued": {
-      const terms = [
-        event.valuation_cap_micros ? `${dollars(event.valuation_cap_micros)} post-money cap` : "no cap",
-        event.discount_basis_points ? `${event.discount_basis_points / 100}% discount` : null,
-        event.mfn ? "MFN clause" : null,
-      ].filter(Boolean);
-      return `${event.holder} receives a ${dollars(event.purchase_micros)} SAFE (${terms.join(", ")}), paid in ${shortHex(event.settlement)}`;
-    }
+    case "safe_issued":
+      return `${event.holder} receives a ${dollars(event.purchase_micros)} SAFE (${describeTerms(event)}), paid in ${shortHex(event.settlement)}`;
+    case "safe_round_opened":
+      return `A round opens on ${describeTerms(event.mandate.terms)}: checks from ${dollars(event.mandate.min_check_micros)}, up to ${dollars(event.mandate.max_raise_micros)} in total`;
+    case "safe_subscribed":
+      return `${event.holder} subscribes ${dollars(event.purchase_micros)} to the open round, paid in ${shortHex(event.settlement)}`;
+    case "safe_round_ended":
+      return "The open round ends";
     case "mfn_elected":
       return `${event.target} adopts the terms of ${event.source}`;
     case "payout_destination_set":

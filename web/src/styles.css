@@ -732,3 +732,32 @@
     display: none;
   }
 }
+
+/* A round's terms: label above value, three across where they fit */
+
+.terms {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr));
+  gap: var(--space-sm) var(--space-md);
+  padding: var(--space-sm) 0;
+  border-top: var(--rule-hair) solid var(--color-rule-2);
+  border-bottom: var(--rule-hair) solid var(--color-rule-2);
+}
+
+.terms div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  min-width: 0;
+}
+
+.terms dt {
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+
+.terms dd {
+  margin: 0;
+  font-weight: 500;
+}

@@ -12,13 +12,14 @@ import type { Config } from "./config.ts";
 import { isHex } from "./encoding.ts";
 import type { Enclave } from "./enclave.ts";
 import { Refused } from "./near.ts";
-import type { Payments } from "./payments.ts";
+import { isSubscriptionMemo, type Payments, type Subscriptions } from "./payments.ts";
 
 export interface Services {
   config: Config;
   enclave: Enclave;
   anchors: Anchors;
   payments: Payments;
+  subscriptions: Subscriptions;
   payouts: Payouts;
 }
 
@@ -151,6 +152,17 @@ export function apiRoutes(services: Services): Router {
   router.post(
     "/payments",
     handle(async (request) => services.payments.pay(micros(request.body?.micros, config.maxPaymentMicros))),
+  );
+
+  router.post(
+    "/payments/subscription",
+    handle(async (request) => {
+      const memo = request.body?.memo;
+      if (!isSubscriptionMemo(memo)) {
+        throw new BadRequest("memo must be undiluted:<company>:<64 hex characters>");
+      }
+      return services.subscriptions.pay(micros(request.body?.micros, config.maxPaymentMicros), memo);
+    }),
   );
 
   router.post(
