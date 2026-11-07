@@ -36,3 +36,25 @@ export function securityHeaders(rpcUrl: string) {
     next();
   };
 }
+
+/**
+ * Lets the site call the relay from other origins it is published on, such as
+ * GitHub Pages. Only the listed origins get an answer they can read.
+ */
+export function crossOrigin(allowed: readonly string[]) {
+  return (request: Request, response: Response, next: NextFunction) => {
+    const origin = request.headers.origin;
+    if (origin && allowed.includes(origin)) {
+      response.setHeader("Access-Control-Allow-Origin", origin);
+      response.setHeader("Vary", "Origin");
+      response.setHeader("Access-Control-Allow-Methods", "GET, POST");
+      response.setHeader("Access-Control-Allow-Headers", "content-type");
+      response.setHeader("Access-Control-Max-Age", "600");
+    }
+    if (request.method === "OPTIONS") {
+      response.status(204).end();
+      return;
+    }
+    next();
+  };
+}

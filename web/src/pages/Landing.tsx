@@ -1,3 +1,4 @@
+import { EnclaveCheck } from "../components/EnclaveCheck.tsx";
 import { useAction } from "../components/ui.tsx";
 import { companyKey, holderKey } from "../lib/keys.ts";
 import { publicKeyOf, Session } from "../lib/protocol.ts";
@@ -79,6 +80,8 @@ export function Landing() {
           <dd>An MFN holder adopts better terms alone. At a sale, payouts follow the waterfall and cannot be redirected.</dd>
         </div>
       </dl>
+
+      <EnclaveCheck />
 
       <footer className="footer">
         <span>Runs on NEAR testnet with test tokens of no value. Keys stay in your browser.</span>

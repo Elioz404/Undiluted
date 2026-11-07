@@ -150,6 +150,8 @@ export function apiRoutes(services: Services): Router {
 
   router.get("/identity", handle(() => services.enclave.getIdentity()));
 
+  router.get("/attestation", handle(() => services.enclave.identityAttestation()));
+
   router.post(
     "/enclave",
     limitedBy(limits.calls),

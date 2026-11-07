@@ -19,10 +19,24 @@ export interface EnclaveSettings {
   project: string;
   secretsAccount: string;
   secretsProfile: string;
+  /** OutLayer's API, which publishes an attestation for every run. */
+  attestationApi: string;
 }
 
+/** Where to find the attested run that produced the enclave's identity. */
+export interface IdentityRun {
+  transaction: string;
+  sender: string;
+  attestation: unknown;
+}
+
+const ATTESTATION_ATTEMPTS = 10;
+const ATTESTATION_WAIT_MS = 3000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class Enclave {
-  private identity: Promise<unknown> | null = null;
+  private identity: Promise<{ output: unknown; transaction: string }> | null = null;
 
   constructor(
     private readonly near: Near,
@@ -33,7 +47,31 @@ export class Enclave {
    * The enclave's public keys never change, so they are asked for once. Callers
    * arriving together share the one run; a failed run is forgotten.
    */
-  getIdentity(): Promise<unknown> {
+  async getIdentity(): Promise<unknown> {
+    return (await this.identityRun()).output;
+  }
+
+  /**
+   * The attestation of the run that produced the identity. The relay only
+   * fetches it; the browser checks it against Intel and NEAR itself.
+   */
+  async identityAttestation(): Promise<IdentityRun> {
+    const { transaction } = await this.identityRun();
+    const url = `${this.settings.attestationApi.replace(/\/$/, "")}/attestations/by-tx/${transaction}`;
+    for (let attempt = 1; ; attempt += 1) {
+      const response = await fetch(url);
+      if (response.ok) {
+        return { transaction, sender: this.near.accountId, attestation: await response.json() };
+      }
+      // OutLayer publishes the attestation a moment after the run settles.
+      if (response.status !== 404 || attempt >= ATTESTATION_ATTEMPTS) {
+        throw new Error(`no attestation for transaction ${transaction} (${response.status})`);
+      }
+      await sleep(ATTESTATION_WAIT_MS);
+    }
+  }
+
+  private identityRun(): Promise<{ output: unknown; transaction: string }> {
     this.identity ??= this.run({ operation: "identity" }).catch((error: unknown) => {
       this.identity = null;
       throw error;
@@ -52,10 +90,10 @@ export class Enclave {
 
   /** Forwards one encrypted request and returns the enclave's output as it is. */
   async request(envelope: string): Promise<unknown> {
-    return this.run({ operation: "request", envelope });
+    return (await this.run({ operation: "request", envelope })).output;
   }
 
-  private async run(input: unknown): Promise<unknown> {
+  private async run(input: unknown): Promise<{ output: unknown; transaction: string }> {
     const inputData = JSON.stringify(input);
     const cost = await this.near.view<string>(this.settings.contract, "estimate_execution_cost", {
       resource_limits: RESOURCE_LIMITS,
@@ -79,6 +117,6 @@ export class Enclave {
     if (outcome.value === null) {
       throw new Error(`the enclave returned nothing (transaction ${outcome.hash})`);
     }
-    return JSON.parse(outcome.value);
+    return { output: JSON.parse(outcome.value), transaction: outcome.hash };
   }
 }

@@ -11,7 +11,7 @@ import { CliSubmitter, KeySubmitter, Near, type Submitter } from "./near.ts";
 import { Budget, RateLimiter } from "./limits.ts";
 import { Payments, Subscriptions } from "./payments.ts";
 import { apiRoutes } from "./routes.ts";
-import { securityHeaders } from "./security.ts";
+import { crossOrigin, securityHeaders } from "./security.ts";
 
 const SETTLING = { checks: 20, intervalMs: 3000 };
 const PAYMENT_POLLING = { pollIntervalMs: 5000, maxPolls: 40 };
@@ -33,6 +33,7 @@ app.disable("x-powered-by");
 // One proxy in front (the host's), so rate limits see the caller's address.
 app.set("trust proxy", 1);
 app.use(securityHeaders(config.rpcUrl));
+app.use("/api", crossOrigin(config.allowedOrigins));
 app.use(express.json({ limit: "32kb" }));
 app.use(
   "/api",
@@ -43,6 +44,7 @@ app.use(
       project: config.enclaveProject,
       secretsAccount: config.secretsAccount,
       secretsProfile: config.secretsProfile,
+      attestationApi: config.attestationApi,
     }),
     anchors: new Anchors(near, config.anchorContract),
     payments: new Payments(tokens, {

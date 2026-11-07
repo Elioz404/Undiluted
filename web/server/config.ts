@@ -12,6 +12,8 @@ export interface Config {
   signer: { kind: "key"; privateKey: string } | { kind: "near-cli"; path: string };
   outlayerContract: string;
   enclaveProject: string;
+  /** OutLayer's API, where each run's attestation is published. */
+  attestationApi: string;
   secretsAccount: string;
   secretsProfile: string;
   anchorContract: string;
@@ -26,6 +28,8 @@ export interface Config {
   maxExitMicros: bigint;
   /** What the relay spends on everyone's behalf in one day, at most. */
   dailyBudgetMicros: bigint;
+  /** Other origins the site is published on, allowed to call the relay. */
+  allowedOrigins: string[];
   /** Calls one address may make per minute, and spending calls per hour. */
   callsPerMinute: number;
   spendingCallsPerHour: number;
@@ -81,6 +85,7 @@ export function loadConfig(env: Environment): Config {
     signer: signerFrom(env),
     outlayerContract: required(env, "OUTLAYER_CONTRACT"),
     enclaveProject: required(env, "ENCLAVE_PROJECT"),
+    attestationApi: required(env, "OUTLAYER_API_URL"),
     secretsAccount: required(env, "SECRETS_ACCOUNT"),
     secretsProfile: optional(env, "SECRETS_PROFILE", "default"),
     anchorContract: required(env, "ANCHOR_CONTRACT"),
@@ -92,6 +97,10 @@ export function loadConfig(env: Environment): Config {
     maxPaymentMicros: amount(env, "MAX_PAYMENT_MICROS", "5000000"),
     maxExitMicros: amount(env, "MAX_EXIT_MICROS", "10000000"),
     dailyBudgetMicros: amount(env, "DAILY_BUDGET_MICROS", "60000000"),
+    allowedOrigins: optional(env, "ALLOWED_ORIGINS", "")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
     callsPerMinute: count(env, "CALLS_PER_MINUTE", "30"),
     spendingCallsPerHour: count(env, "SPENDING_CALLS_PER_HOUR", "10"),
   };

@@ -314,3 +314,30 @@ fn an_identity_with_a_swapped_encryption_key_is_refused() {
     );
     assert!(request.is_err());
 }
+
+#[test]
+fn the_browser_checks_a_real_attested_identity_run() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    let fixtures = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../attestation/tests/fixtures/"
+    );
+    let read = |name: &str| std::fs::read(format!("{fixtures}{name}")).unwrap();
+    let attestation: serde_json::Value =
+        serde_json::from_slice(&read("identity-attestation.json")).unwrap();
+    let evidence = json!({
+        "attestation": attestation,
+        "output": STANDARD.encode(read("identity-output.json")),
+        "wasm_hash": "c3b8b92a101e575d1c0e2e502c1fc21443fa0e08e864e84fe467d5840bda9f77",
+        "approved": serde_json::from_slice::<serde_json::Value>(&read("approved-measurements.json")).unwrap(),
+        "collaterals": serde_json::from_slice::<serde_json::Value>(&read("collaterals.json")).unwrap(),
+        "now_secs": attestation["timestamp"],
+    });
+    let findings = undiluted_web::verify_enclave_run(&evidence.to_string()).unwrap();
+    assert_eq!(
+        findings.signing_key,
+        "4385ac1675dfd32bf15f994b0bd1effead92649d12ad7422b7ab003ef97f6ab4"
+    );
+}

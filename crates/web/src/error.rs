@@ -10,6 +10,8 @@ pub enum WebError {
     Input(String),
     #[error("the reply is not signed by the enclave")]
     UnauthenticReply,
+    #[error("the enclave's attestation does not check out: {0}")]
+    Attestation(String),
     #[error("the reply answers a different request")]
     MismatchedReply,
     #[error("no randomness available")]

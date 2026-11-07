@@ -3636,6 +3636,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "undiluted-attestation",
  "undiluted-domain",
  "undiluted-envelope",
  "undiluted-ledger",

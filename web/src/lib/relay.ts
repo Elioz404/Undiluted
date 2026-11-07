@@ -36,6 +36,7 @@ const post = <T>(path: string, body: unknown) =>
 export const relay = {
   config: () => request<RelayConfig>("/config"),
   identity: () => request<EnclaveOutput>("/identity"),
+  attestation: () => request<{ transaction: string; sender: string; attestation: unknown }>("/attestation"),
   enclave: (envelope: string) => post<EnclaveOutput>("/enclave", { envelope }),
   registerCompany: (company: string) => post("/companies", { company }),
   publishAnchor: (anchor: Anchor) => post("/anchors", anchor),

@@ -4,12 +4,14 @@
 //! the tests and the command-line client run. JavaScript only moves JSON and
 //! base64 around, so it never handles a key in a way that could go wrong.
 
+mod attestation;
 mod dto;
 mod error;
 mod protocol;
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
+pub use attestation::{EnclaveEvidence, EnclaveFindings, verify_enclave_run};
 pub use dto::{ActorDto, CommandDto, EventDto, ResponseDto};
 pub use error::WebError;
 pub use protocol::{
@@ -58,4 +60,13 @@ pub fn open_reply_js(identity: &str, prepared: &str, envelope: &str) -> Result<S
 #[wasm_bindgen(js_name = subscriptionMemo)]
 pub fn subscription_memo_js(company: &str, key: &str) -> Result<String, String> {
     subscription_memo(company, key).map_err(|error| error.to_string())
+}
+
+/// Checks an attested run of the enclave's `identity` and returns what it
+/// established as JSON. `evidence` holds the attestation, the run's output and
+/// `OutLayer`'s collateral and approved measurements; see `EnclaveEvidence`.
+#[wasm_bindgen(js_name = verifyEnclaveRun)]
+pub fn verify_enclave_run_js(evidence: &str) -> Result<String, String> {
+    let findings = verify_enclave_run(evidence).map_err(|error| error.to_string())?;
+    serde_json::to_string(&findings).map_err(|error| error.to_string())
 }

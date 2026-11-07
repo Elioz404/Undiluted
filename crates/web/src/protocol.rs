@@ -63,7 +63,7 @@ pub fn subscription_memo(company: &str, key: &str) -> Result<String, WebError> {
 
 /// Accepts an identity only if its signing key vouches for its encryption key,
 /// so whoever relays it cannot substitute a key of their own.
-fn parse_identity(identity: &str) -> Result<([u8; 32], PublicKey), WebError> {
+pub(crate) fn parse_identity(identity: &str) -> Result<([u8; 32], PublicKey), WebError> {
     let identity: Identity =
         serde_json::from_str(identity).map_err(|error| WebError::input(&error))?;
     let encryption_key = decode_key(&identity.encryption_key)?;
