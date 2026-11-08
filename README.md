@@ -359,6 +359,10 @@ and its relay also ship as one container image: `docker build -t undiluted .`
   head and pay exits only on the enclave's signature; NEP-141 stablecoin transfers,
   read from the token's own logs, back every SAFE; the 1Click API routes
   cross-token payments.
+- **Other project:** the same author also submitted
+  [Setoff](https://github.com/Elioz404/Setoff), a clearing house that cancels the
+  debt firms owe each other in cycles. The two projects share no code and are
+  independent.
 
 ## Third-party code
 
